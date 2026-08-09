@@ -1,0 +1,274 @@
+.panel-program {
+  bottom: 20px;
+  left: 20px;
+  width: 372px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.panel-program.is-linking {
+  box-shadow:
+    0 6px 22px rgba(40, 40, 50, 0.12),
+    inset 0 0 0 2px rgba(45, 143, 213, 0.6);
+}
+
+.program-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.program-title {
+  font-size: 15px;
+  font-weight: 680;
+  font-variant-numeric: tabular-nums;
+}
+
+.program-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(45, 143, 213, 0.16);
+  color: #1c6ba8;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.program-cycle {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7078;
+  font-variant-numeric: tabular-nums;
+}
+
+.program-hint {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #5c626b;
+}
+
+/* --- Split bar ------------------------------------------------------------- */
+
+.splitbar {
+  display: flex;
+  height: 30px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(90, 100, 115, 0.14);
+  touch-action: none;
+  user-select: none;
+}
+
+.splitbar-group {
+  position: relative;
+  display: flex;
+  height: 100%;
+}
+
+.splitbar-phase {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  min-width: 0;
+  overflow: hidden;
+  transition: filter 0.15s;
+  filter: saturate(0.55) brightness(1.12);
+}
+
+/* The phase running right now reads at full strength. */
+.splitbar-phase.is-current {
+  filter: none;
+}
+
+.splitbar-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.splitbar-clear {
+  height: 100%;
+  opacity: 0.75;
+}
+
+.splitbar-handle {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  width: 10px;
+  height: 100%;
+  cursor: ew-resize;
+  z-index: 2;
+}
+
+.splitbar-handle::after {
+  content: "";
+  position: absolute;
+  inset: 4px 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.85);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.splitbar-handle:hover::after {
+  opacity: 1;
+}
+
+/* --- Numeric phase list ---------------------------------------------------- */
+
+.program-phases {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 12px;
+}
+
+.program-phase {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.program-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+}
+
+.program-phase-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #5c626b;
+}
+
+.program-phase input {
+  width: 48px;
+  padding: 3px 5px;
+  border: 1px solid rgba(90, 100, 115, 0.22);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.7);
+  font: 600 12px/1 inherit;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+  text-align: right;
+}
+
+.program-unit {
+  color: #8a9099;
+  font-size: 11px;
+}
+
+/* --- Sliders --------------------------------------------------------------- */
+
+.program-field {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #5c626b;
+}
+
+.program-field > span:first-child {
+  width: 44px;
+}
+
+.program-field input[type="range"] {
+  flex: 1;
+  accent-color: #2c3036;
+}
+
+.program-value {
+  min-width: 38px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #2c3036;
+}
+
+/* --- Actions and members --------------------------------------------------- */
+
+.program-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.btn {
+  padding: 7px 11px;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(70, 78, 90, 0.12);
+  font: 600 12px/1 inherit;
+  font-family: inherit;
+  color: #2c3036;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: rgba(70, 78, 90, 0.2);
+}
+
+.btn.is-primary {
+  background: #2c3036;
+  color: #fff;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.link-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.link-chip {
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: rgba(45, 143, 213, 0.18);
+  color: #1c6ba8;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.program-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding-top: 2px;
+  border-top: 1px solid rgba(90, 100, 115, 0.15);
+}
+
+.member {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  background: rgba(70, 78, 90, 0.08);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.member.is-current {
+  background: rgba(44, 48, 54, 0.16);
+}
+
+.member em {
+  font-style: normal;
+  color: #6b7078;
+}

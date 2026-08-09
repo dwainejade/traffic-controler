@@ -1,0 +1,55 @@
+/**
+ * Intelligent Driver Model (Treiber et al.) — the car-following law that gives
+ * every vehicle its acceleration from the gap to whatever is in front of it.
+ *
+ * A red light is fed in as a *virtual stationary leader* parked at the stop
+ * line, so queueing behind a car and queueing behind a signal run through
+ * exactly the same code path.
+ */
+export const IDM = {
+  /** Desired free-flow speed, m/s (~50 km/h). */
+  v0: 13.9,
+  /** Safe time headway, s. */
+  T: 1.3,
+  /**
+   * Maximum acceleration, m/s^2. Above a real car's comfortable figure on
+   * purpose: start-up lost time at the head of a queue is the single biggest
+   * drag on junction capacity, and a sluggish pull-away makes the whole game
+   * feel unresponsive to the player's phase calls.
+   */
+  a: 2.2,
+  /** Comfortable deceleration, m/s^2. */
+  b: 2.2,
+  /** Minimum bumper-to-bumper gap at a standstill, m. */
+  s0: 2.2,
+  /** Free-acceleration exponent. */
+  delta: 4,
+} as const;
+
+/** Hard ceiling on braking, used when a gap has already been violated. */
+const MAX_BRAKE = -9;
+
+/**
+ * @param v       this car's speed
+ * @param gap     clear distance to the leader's rear bumper (may be negative)
+ * @param leaderV leader's speed; 0 for a stop line
+ * @param v0      desired speed, overridable for slow movements like tight turns
+ */
+export function idmAccel(
+  v: number,
+  gap: number,
+  leaderV: number,
+  v0: number = IDM.v0,
+): number {
+  const free = 1 - Math.pow(v / v0, IDM.delta);
+
+  if (gap === Infinity) return IDM.a * free;
+  if (gap <= 0.05) return MAX_BRAKE;
+
+  const dv = v - leaderV;
+  const sStar =
+    IDM.s0 + Math.max(0, v * IDM.T + (v * dv) / (2 * Math.sqrt(IDM.a * IDM.b)));
+
+  const accel = IDM.a * (free - (sStar / gap) * (sStar / gap));
+  return Math.max(accel, MAX_BRAKE);
+}

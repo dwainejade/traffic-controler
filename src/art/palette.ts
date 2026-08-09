@@ -1,0 +1,84 @@
+/**
+ * Locked palette, sampled from the Apple Maps 3D driving reference.
+ *
+ * The governing rule: the environment is high-key and desaturated (<20% sat),
+ * so the only saturated things on screen are cars and signals (70-90% sat).
+ * Do not add saturated environment colors without removing one.
+ */
+
+export const PALETTE = {
+  /** Page behind the level card. Slightly darker than the card so it reads as an object. */
+  background: '#E3E0DA',
+
+  /** Ground / sidewalk. The brightest thing on screen. */
+  ground: '#F0EEEA',
+
+  /**
+   * Road surface. Deliberately darker than Apple's #7C8085 — the road network
+   * is the playfield here and has to silhouette clearly against the ground.
+   */
+  road: '#5E6469',
+  /** Curb / casing, drawn as a lip just under and around the asphalt. */
+  curb: '#4E5459',
+  /** Lane markings, stop lines, crosswalks. */
+  marking: '#FFFFFF',
+
+  /** Park fill. Accent only — never base terrain. */
+  park: '#93C97E',
+  treeFoliage: '#79B463',
+  treeFoliageDark: '#689C54',
+  treeTrunk: '#8B7355',
+
+  /** Buildings: near-white, separated from the ground mostly by contact shadow. */
+  buildingBase: '#DAD7D1',
+  buildingTop: '#F4F2EE',
+
+  /** Per-building tint categories, assigned at scatter time to break up the mass. */
+  buildingTints: ['#E9D8D0', '#DDDEE1', '#EDE6D8', '#E4E2DD'] as const,
+
+  accent: '#A8D8D0',
+} as const
+
+/**
+ * Real-world car colour distribution, weighted roughly as the actual global
+ * fleet: about three quarters achromatic, led by white, black, grey and silver.
+ *
+ * Cars used to be coloured by destination, which made every vehicle's intent
+ * readable at a glance — nothing like real traffic. Now you can only tell where
+ * a car is going the way you can in life: which lane it picked, and whether its
+ * indicator is on.
+ *
+ * A side effect worth knowing: with cars mostly neutral, the signals become the
+ * only saturated thing on screen, which is the right emphasis for this game.
+ */
+export const VEHICLE_COLORS: readonly { hex: string; weight: number }[] = [
+  { hex: '#EDEDEA', weight: 24 }, // white
+  { hex: '#2A2C2F', weight: 19 }, // black
+  { hex: '#8C9094', weight: 15 }, // grey
+  { hex: '#C3C7CA', weight: 12 }, // silver
+  { hex: '#2F4460', weight: 7 }, // dark blue
+  { hex: '#5A6570', weight: 6 }, // gunmetal
+  { hex: '#8E3038', weight: 6 }, // dark red
+  { hex: '#33513C', weight: 4 }, // dark green
+  { hex: '#B9A88B', weight: 4 }, // beige
+  { hex: '#B5563A', weight: 3 }, // bronze
+]
+
+/** Amber of a turn indicator. Emissive, so it reads against any body colour. */
+export const INDICATOR = '#FFA318'
+
+/** Reserved for destination markers on the map, not for vehicles. */
+export const DISTRICT_COLORS = [
+  '#E8503A', // coral
+  '#2D8FD5', // azure
+  '#F0A830', // amber
+  '#8B5CF6', // violet
+  '#16A394', // teal
+] as const
+
+/** Signal colors — emissive, and the only things allowed past the bloom threshold. */
+export const SIGNAL = {
+  green: '#3DDB6B',
+  amber: '#FFB020',
+  red: '#FF4438',
+} as const

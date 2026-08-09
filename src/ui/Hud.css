@@ -1,0 +1,388 @@
+/* Floating translucent panels, matching the reference's UI language. */
+.panel {
+  position: absolute;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.74);
+  backdrop-filter: blur(20px) saturate(1.4);
+  box-shadow: 0 6px 22px rgba(40, 40, 50, 0.12);
+  font:
+    500 13px/1.3 -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    system-ui,
+    sans-serif;
+  color: #2c3036;
+}
+
+.panel-objective {
+  top: 78px;
+  left: 20px;
+  min-width: 300px;
+}
+
+.objective-row {
+  display: flex;
+  gap: 20px;
+}
+
+.progress {
+  margin-top: 10px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(90, 100, 115, 0.18);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: #3ddb6b;
+  transition: width 0.3s ease-out;
+}
+
+.stat-quota {
+  font-size: 14px;
+  font-weight: 550;
+  color: #8a9099;
+}
+
+.stat-value.is-urgent {
+  color: #ff4438;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat-value {
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: #6b7078;
+  text-transform: lowercase;
+}
+
+.panel-phases {
+  bottom: 20px;
+  left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 190px;
+}
+
+.phase-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7078;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.phase-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.phase {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.phase:hover {
+  background: rgba(120, 130, 145, 0.12);
+}
+
+.phase.is-current {
+  background: rgba(61, 219, 107, 0.22);
+}
+
+/* A queued phase is waiting on clearance — it cannot be served immediately. */
+.phase.is-queued:not(.is-current) {
+  background: rgba(255, 176, 32, 0.22);
+}
+
+.phase kbd {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: rgba(70, 78, 90, 0.14);
+  font: 600 11px/1 inherit;
+  font-family: inherit;
+}
+
+/*
+ * The crash beat: drain the colour out of the world so the run reads as over.
+ * A backdrop filter does this over the canvas without a post-processing pass.
+ */
+.drain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  backdrop-filter: saturate(0.12) brightness(1.04);
+  transition: opacity 0.45s ease-out;
+}
+
+.drain.is-active {
+  opacity: 1;
+}
+
+.result {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  animation: result-in 0.5s 0.35s both;
+}
+
+@keyframes result-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+
+.result-card {
+  padding: 30px 34px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(28px) saturate(1.5);
+  box-shadow: 0 18px 50px rgba(40, 40, 50, 0.2);
+  text-align: center;
+  max-width: 380px;
+  font:
+    500 14px/1.5 -apple-system,
+    BlinkMacSystemFont,
+    "SF Pro Text",
+    system-ui,
+    sans-serif;
+  color: #2c3036;
+}
+
+.result-card h1 {
+  font-size: 27px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  margin-bottom: 8px;
+}
+
+.result-card h1.is-won {
+  color: #16a394;
+}
+
+.result-card h1.is-lost {
+  color: #e8503a;
+}
+
+.result-card p {
+  color: #5c626b;
+  margin-bottom: 20px;
+}
+
+.result-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 11px;
+  background: #2c3036;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.result-button kbd {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.2);
+  font: 600 11px/1 inherit;
+}
+
+.phase:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.panel-junctions {
+  top: 190px;
+  left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px;
+}
+
+.jchip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.jchip:hover {
+  background: rgba(120, 130, 145, 0.12);
+}
+
+.jchip.is-selected {
+  background: rgba(44, 48, 54, 0.1);
+  box-shadow: inset 0 0 0 1.5px rgba(44, 48, 54, 0.35);
+}
+
+.jchip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.jchip-id {
+  flex: 1;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Waiting-car count: the number that tells you where to go next. */
+.jchip-queue {
+  min-width: 20px;
+  text-align: right;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: #6b7078;
+}
+
+.phase-node {
+  margin-left: auto;
+  font-weight: 650;
+  color: #2c3036;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.result-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.result-button.is-secondary {
+  background: rgba(70, 78, 90, 0.14);
+  color: #2c3036;
+}
+
+.result-button.is-secondary kbd {
+  background: rgba(70, 78, 90, 0.16);
+}
+
+/* --- Time controls --------------------------------------------------------- */
+
+.panel-speed {
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  gap: 2px;
+  padding: 6px;
+}
+
+.speed {
+  min-width: 34px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  font: 600 12px/1 inherit;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  color: #6b7078;
+  cursor: pointer;
+}
+
+.speed:hover {
+  background: rgba(120, 130, 145, 0.12);
+}
+
+.speed.is-current {
+  background: #2c3036;
+  color: #fff;
+}
+
+.observe-badge {
+  display: inline-block;
+  margin-bottom: 9px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(22, 163, 148, 0.16);
+  color: #0f7f73;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.panel-speed {
+  align-items: center;
+}
+
+.demand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 0 6px;
+  margin-right: 4px;
+  border-right: 1px solid rgba(90, 100, 115, 0.18);
+}
+
+.demand-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7078;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.demand input[type="range"] {
+  width: 96px;
+  accent-color: #2c3036;
+}
+
+.demand-value {
+  min-width: 40px;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
