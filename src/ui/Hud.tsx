@@ -16,6 +16,7 @@ import {
   LAYERS,
 } from "./hudStore";
 import { ProgramPanel } from "./ProgramPanel";
+import { useIsMobile } from "./useIsMobile";
 import { warmupFor } from "../sim/types";
 import "./Hud.css";
 
@@ -31,6 +32,23 @@ function formatClock(seconds: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** The car in the info button — the same three-quarter silhouette the map uses. */
+function CarIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path
+        d="M3.4 14.6h17.2M5 14.6l1.6-4.9a2 2 0 0 1 1.9-1.4h7a2 2 0 0 1 1.9 1.4l1.6 4.9M4.2 14.6v2.6a.8.8 0 0 0 .8.8h1.4a.8.8 0 0 0 .8-.8v-.9m12 -1.7v2.6a.8.8 0 0 1-.8.8h-1.4a.8.8 0 0 1-.8-.8v-.9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M7.2 16.4h9.6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function Hud({
   world,
   onAdvance,
@@ -41,7 +59,10 @@ export function Hud({
   hasNext: boolean;
 }) {
   const hud = useHud();
+  const mobile = useIsMobile();
   const [layersOpen, setLayersOpen] = useState(false);
+  // The mobile info sheet: everything the bottom bar no longer has room for.
+  const [infoOpen, setInfoOpen] = useState(false);
   const sandbox = world.level.sandbox === true;
   // A sandbox never ends, so it never shows a result card.
   const over = hud.state !== "running" && !sandbox;
@@ -119,76 +140,144 @@ export function Hud({
   const dotFor = (signal: keyof typeof SIGNAL_LABEL) =>
     signal === "green" ? SIGNAL.green : signal === "amber" ? SIGNAL.amber : SIGNAL.red;
 
+  /*
+   * The blocks below are written once and placed twice: on a wide screen they
+   * are floating panels in their own corners, on a narrow one they stack inside
+   * the info sheet. Only the container changes.
+   */
+
+  const objective = !sandbox && (
+    <>
+      {hud.observing && <div className="observe-badge">Observing</div>}
+      <div className="objective-row">
+        {hud.delayBudget !== null ? (
+          <div className="stat">
+            <span
+              className={
+                "stat-value" +
+                (hud.delayHours > hud.delayBudget * 0.85 ? " is-urgent" : "")
+              }
+            >
+              {hud.delayHours.toFixed(1)}
+              {!hud.observing && (
+                <span className="stat-quota">/{hud.delayBudget.toFixed(1)}</span>
+              )}
+            </span>
+            <span className="stat-label">delay hrs</span>
+          </div>
+        ) : (
+          <div className="stat">
+            <span className="stat-value">
+              {hud.delivered}
+              {!hud.observing && <span className="stat-quota">/{hud.quota}</span>}
+            </span>
+            <span className="stat-label">delivered</span>
+          </div>
+        )}
+        <div className="stat">
+          <span className={"stat-value" + (urgent && !hud.observing ? " is-urgent" : "")}>
+            {formatClock(hud.observing ? hud.elapsed : hud.timeLeft)}
+          </span>
+          <span className="stat-label">{hud.observing ? "elapsed" : "remaining"}</span>
+        </div>
+        <div className="stat">
+          <span className="stat-value">{hud.meanWait.toFixed(0)}s</span>
+          <span className="stat-label">mean wait</span>
+        </div>
+        <div className="stat">
+          <span className="stat-value">{hud.active}</span>
+          <span className="stat-label">on map</span>
+        </div>
+        {hud.observing && (
+          <>
+            <div className="stat">
+              <span className="stat-value">{throughput.toFixed(0)}</span>
+              <span className="stat-label">cars/min</span>
+            </div>
+            <div className="stat">
+              <span className={"stat-value" + (hud.collisions > 0 ? " is-urgent" : "")}>
+                {hud.collisions}
+              </span>
+              <span className="stat-label">collisions</span>
+            </div>
+          </>
+        )}
+      </div>
+      {!hud.observing && (
+        <div className="progress">
+          <div
+            className={"progress-fill" + (barIsThreat ? " is-threat" : "")}
+            style={{ width: `${progress * 100}%` }}
+          />
+        </div>
+      )}
+    </>
+  );
+
+  /* Sandbox has no objective, only a dashboard and a demand dial. */
+  const sandboxStats = sandbox && (
+    <>
+      <div className="objective-row">
+        <div className="stat">
+          <span className="stat-value">{hud.active}</span>
+          <span className="stat-label">on map</span>
+        </div>
+        <div className="stat">
+          <span className="stat-value">{hud.networkDelay.toFixed(0)}s</span>
+          <span className="stat-label">avg delay</span>
+        </div>
+        <div className="stat">
+          <span className="stat-value">{throughput.toFixed(0)}</span>
+          <span className="stat-label">cars/min</span>
+        </div>
+      </div>
+      <label className="sheet-demand" title="Cars arriving per second">
+        <span>traffic</span>
+        <input
+          type="range"
+          min={0.2}
+          max={1.6}
+          step={0.02}
+          value={hud.demand}
+          onChange={(e) => {
+            world.demand = Number(e.target.value);
+          }}
+        />
+        <b>{hud.demand.toFixed(2)}/s</b>
+      </label>
+    </>
+  );
+
+  const junctionList = hud.junctions.length > 1 && (
+    <>
+      {hotspots.length > 0 && (
+        <div className="hotspot-head">{crowded ? "Most congested" : "Junctions"}</div>
+      )}
+      {hotspots.map((j) => (
+        <button
+          key={j.id}
+          className={"jchip" + (j.id === hud.selected ? " is-selected" : "")}
+          onClick={() => {
+            focusJunction(j.id);
+            // On a phone the sheet covers the map it just flew to.
+            if (mobile) setInfoOpen(false);
+          }}
+          title={crowded ? "Jump to this junction" : undefined}
+        >
+          <span className="jchip-dot" style={{ background: dotFor(j.signal) }} />
+          <span className="jchip-id">{j.id}</span>
+          <span className={"jchip-queue" + (j.queue >= 8 ? " is-hot" : "")}>{j.queue}</span>
+        </button>
+      ))}
+    </>
+  );
+
   return (
     <>
       <div className={"drain" + (over ? " is-active" : "")} />
 
-      {!sandbox && (
-      <div className="panel panel-objective">
-        {hud.observing && <div className="observe-badge">Observing</div>}
-        <div className="objective-row">
-          {hud.delayBudget !== null ? (
-            <div className="stat">
-              <span
-                className={
-                  "stat-value" +
-                  (hud.delayHours > hud.delayBudget * 0.85 ? " is-urgent" : "")
-                }
-              >
-                {hud.delayHours.toFixed(1)}
-                {!hud.observing && (
-                  <span className="stat-quota">/{hud.delayBudget.toFixed(1)}</span>
-                )}
-              </span>
-              <span className="stat-label">delay hrs</span>
-            </div>
-          ) : (
-            <div className="stat">
-              <span className="stat-value">
-                {hud.delivered}
-                {!hud.observing && <span className="stat-quota">/{hud.quota}</span>}
-              </span>
-              <span className="stat-label">delivered</span>
-            </div>
-          )}
-          <div className="stat">
-            <span className={"stat-value" + (urgent && !hud.observing ? " is-urgent" : "")}>
-              {formatClock(hud.observing ? hud.elapsed : hud.timeLeft)}
-            </span>
-            <span className="stat-label">{hud.observing ? "elapsed" : "remaining"}</span>
-          </div>
-          <div className="stat">
-            <span className="stat-value">{hud.meanWait.toFixed(0)}s</span>
-            <span className="stat-label">mean wait</span>
-          </div>
-          <div className="stat">
-            <span className="stat-value">{hud.active}</span>
-            <span className="stat-label">on map</span>
-          </div>
-          {hud.observing && (
-            <>
-              <div className="stat">
-                <span className="stat-value">{throughput.toFixed(0)}</span>
-                <span className="stat-label">cars/min</span>
-              </div>
-              <div className="stat">
-                <span className={"stat-value" + (hud.collisions > 0 ? " is-urgent" : "")}>
-                  {hud.collisions}
-                </span>
-                <span className="stat-label">collisions</span>
-              </div>
-            </>
-          )}
-        </div>
-        {!hud.observing && (
-          <div className="progress">
-            <div
-              className={"progress-fill" + (barIsThreat ? " is-threat" : "")}
-              style={{ width: `${progress * 100}%` }}
-            />
-          </div>
-        )}
-      </div>
+      {!sandbox && !mobile && (
+        <div className="panel panel-objective">{objective}</div>
       )}
 
       {/*
@@ -198,7 +287,7 @@ export function Hud({
       */}
       <div className="layers">
         <button
-          className={"layers-button" + (layersOpen ? " is-open" : "")}
+          className={"icon-button" + (layersOpen ? " is-open" : "")}
           onClick={() => setLayersOpen(!layersOpen)}
           title="Map layers"
           aria-expanded={layersOpen}
@@ -232,11 +321,11 @@ export function Hud({
       </div>
 
       {/*
-        The one thing always on screen. Everything else — the junction list, the
-        program editor — waits until you actually pick a junction, so a city you
-        just want to watch stays a city you can see.
+        The one thing always on screen. On a phone it is only the two controls
+        you reach for while watching — time, and what time it is — and the rest
+        moves behind the car button beside it.
       */}
-      <div className="panel panel-dock">
+      <div className={"panel panel-dock" + (mobile ? " is-mobile" : "")}>
         <button
           className={"dock-play" + (hud.speed === 0 ? " is-paused" : "")}
           onClick={() => setSpeed(hud.speed === 0 ? 1 : 0)}
@@ -282,49 +371,84 @@ export function Hud({
           <span>{hud.layers.daynight ? "map time" : "held"}</span>
         </div>
 
-        <span className="dock-sep" />
-
-        {sandbox ? (
+        {!mobile && (
           <>
-            <div className="dock-stat">
-              <b>{hud.active}</b>
-              <span>on map</span>
-            </div>
-            <div className="dock-stat">
-              <b>{hud.networkDelay.toFixed(0)}s</b>
-              <span>avg delay</span>
-            </div>
-            <div className="dock-stat">
-              <b>{throughput.toFixed(0)}</b>
-              <span>cars/min</span>
-            </div>
-            <label className="dock-demand" title="Cars arriving per second">
-              <span>traffic</span>
-              <input
-                type="range"
-                min={0.2}
-                max={1.6}
-                step={0.02}
-                value={hud.demand}
-                onChange={(e) => {
-                  world.demand = Number(e.target.value);
-                }}
-              />
-              <b>{hud.demand.toFixed(2)}/s</b>
-            </label>
-          </>
-        ) : (
-          <div className="dock-stat">
-            <b>{hud.active}</b>
-            <span>on map</span>
-          </div>
-        )}
+            <span className="dock-sep" />
 
-        <span className="dock-sep" />
-        <span className="dock-hint">
-          {junction ? `editing ${junction.id}` : "click a junction to re-time it"}
-        </span>
+            {sandbox ? (
+              <>
+                <div className="dock-stat">
+                  <b>{hud.active}</b>
+                  <span>on map</span>
+                </div>
+                <div className="dock-stat">
+                  <b>{hud.networkDelay.toFixed(0)}s</b>
+                  <span>avg delay</span>
+                </div>
+                <div className="dock-stat">
+                  <b>{throughput.toFixed(0)}</b>
+                  <span>cars/min</span>
+                </div>
+                <label className="dock-demand" title="Cars arriving per second">
+                  <span>traffic</span>
+                  <input
+                    type="range"
+                    min={0.2}
+                    max={1.6}
+                    step={0.02}
+                    value={hud.demand}
+                    onChange={(e) => {
+                      world.demand = Number(e.target.value);
+                    }}
+                  />
+                  <b>{hud.demand.toFixed(2)}/s</b>
+                </label>
+              </>
+            ) : (
+              <div className="dock-stat">
+                <b>{hud.active}</b>
+                <span>on map</span>
+              </div>
+            )}
+
+            <span className="dock-sep" />
+            <span className="dock-hint">
+              {junction ? `editing ${junction.id}` : "click a junction to re-time it"}
+            </span>
+          </>
+        )}
       </div>
+
+      {/* The car: everything the bottom bar gave up, one tap away. */}
+      {mobile && (
+        <button
+          className={"icon-button info-button" + (infoOpen ? " is-open" : "")}
+          onClick={() => setInfoOpen(!infoOpen)}
+          title="Run details"
+          aria-expanded={infoOpen}
+        >
+          <CarIcon />
+        </button>
+      )}
+
+      {mobile && infoOpen && (
+        <>
+          <div className="sheet-scrim" onClick={() => setInfoOpen(false)} />
+          <div className="sheet">
+            <div className="sheet-grip" />
+            <div className="sheet-body">
+              {objective}
+              {sandboxStats}
+              {junctionList && <div className="sheet-junctions">{junctionList}</div>}
+              <p className="sheet-hint">
+                {junction
+                  ? `Editing ${junction.id} — the program is under the map.`
+                  : "Tap a junction on the map to re-time it."}
+              </p>
+            </div>
+          </div>
+        </>
+      )}
 
       {/*
         Junctions ranked by how much traffic is waiting at them.
@@ -332,30 +456,8 @@ export function Hud({
         not have to — the whole skill is noticing where the city is struggling,
         so the list sorts itself and puts the worst at the top.
       */}
-      {hud.junctions.length > 1 && junction && (
-        <div className="panel panel-junctions">
-          {hotspots.length > 0 && (
-            <div className="hotspot-head">
-              {crowded ? "Most congested" : "Junctions"}
-            </div>
-          )}
-          {hotspots.map((j) => (
-            <button
-              key={j.id}
-              className={"jchip" + (j.id === hud.selected ? " is-selected" : "")}
-              onClick={() => focusJunction(j.id)}
-              title={crowded ? "Jump to this junction" : undefined}
-            >
-              <span className="jchip-dot" style={{ background: dotFor(j.signal) }} />
-              <span className="jchip-id">{j.id}</span>
-              <span
-                className={"jchip-queue" + (j.queue >= 8 ? " is-hot" : "")}
-              >
-                {j.queue}
-              </span>
-            </button>
-          ))}
-        </div>
+      {!mobile && hud.junctions.length > 1 && junction && (
+        <div className="panel panel-junctions">{junctionList}</div>
       )}
 
       {junction && <ProgramPanel world={world} junction={junction} />}
@@ -374,7 +476,7 @@ export function Hud({
               {hud.state === "won"
                 ? `${hud.delivered} cars through, ${hud.meanWait.toFixed(0)}s average wait.`
                 : hud.failReason === "crash"
-                  ? "A car was still inside the junction when a crossing movement went green \u2014 it had nowhere to go because the road ahead was full. Watch for lanes tinting warm, and don't hold a phase green into a queue that cannot move."
+                  ? "A car was still inside the junction when a crossing movement went green — it had nowhere to go because the road ahead was full. Watch for lanes tinting warm, and don't hold a phase green into a queue that cannot move."
                   : `${hud.delivered} of ${hud.quota} cars made it through.`}
             </p>
             <div className="result-actions">

@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
-import { LEVELS } from "./levels";
+import { useEffect, useMemo, useState } from "react";
+import { useLevels } from "./levels/registry";
 import { Scene } from "./render/Scene";
 import { Hud } from "./ui/Hud";
+import { LevelSheet } from "./ui/LevelSheet";
 import { useHud } from "./ui/hudStore";
 import { measure, validateLevel } from "./sim/validate";
 import { warmupFor, type LevelDef } from "./sim/types";
@@ -16,14 +17,36 @@ const worldCache = new WeakMap<LevelDef, World>();
 
 
 export default function App() {
-  // Open on the first imported area. The small junctions are still there to
-  // learn on, but a real street is the thing worth looking at, and it should be
-  // the thing you land in. By id prefix, not by position — dev builds append a
-  // test level after it.
-  const [index, setIndex] = useState(() =>
-    Math.max(0, LEVELS.findIndex((l) => l.id.startsWith("osm_"))),
-  );
-  const level = LEVELS[index];
+  /*
+   * The list grows: saved areas are read from IndexedDB a moment after boot,
+   * and imported ones are appended whenever the player adds them. So the
+   * current level is held by id — an index would mean "position in a list that
+   * changed shape underneath me".
+   */
+  const levels = useLevels((s) => s.levels);
+  const [currentId, setCurrentId] = useState<string | null>(null);
+
+  /*
+   * Open on the first imported area. The small junctions are still there to
+   * learn on, but a real street is the thing worth looking at, and it should be
+   * the thing you land in. By id prefix, not by position — dev builds append a
+   * test level after it. The last fallback also covers a saved area being
+   * deleted while it was the one on screen.
+   */
+  const level =
+    levels.find((l) => l.id === currentId) ??
+    levels.find((l) => l.id.startsWith("osm_")) ??
+    levels[0];
+  const index = levels.indexOf(level);
+
+  /*
+   * Console handle on the level list. Its own effect rather than a line inside
+   * the world memo below, which returns early on a cache hit and so would leave
+   * this pointing at the list as it was before the saved areas loaded.
+   */
+  useEffect(() => {
+    if (import.meta.env.DEV) Object.assign(globalThis, { LEVELS: levels });
+  }, [levels]);
 
   // The world lives outside React entirely — React only ever reads a throttled
   // mirror of it. Re-rendering on simulation state would cost more than the sim.
@@ -45,7 +68,6 @@ export default function App() {
     if (import.meta.env.DEV) {
       Object.assign(globalThis, {
         world: w,
-        LEVELS,
         SIMDEV: { World, validateLevel, measure },
       });
 
@@ -61,30 +83,24 @@ export default function App() {
     return w;
   }, [level]);
 
-  const goTo = (next: number) => {
+  const goTo = (id: string) => {
     // Selection belongs to the old level's junctions; clear it before switching.
     useHud.setState({ selected: null });
-    setIndex(Math.max(0, Math.min(next, LEVELS.length - 1)));
+    setCurrentId(id);
   };
 
   return (
     <div className="app">
       <Scene key={level.id} level={level} world={world} />
-      <div className="panel panel-title">
-        <span className="title-name">{level.name}</span>
-        <span className="title-levels">
-          {LEVELS.map((l, i) => (
-            <button
-              key={l.id}
-              className={"title-level" + (i === index ? " is-current" : "")}
-              onClick={() => goTo(i)}
-            >
-              {i + 1}
-            </button>
-          ))}
-        </span>
-      </div>
-      <Hud world={world} onAdvance={() => goTo(index + 1)} hasNext={index < LEVELS.length - 1} />
+      <LevelSheet current={level} onPick={goTo} />
+      <Hud
+        world={world}
+        onAdvance={() => {
+          const next = levels[index + 1];
+          if (next) goTo(next.id);
+        }}
+        hasNext={index < levels.length - 1}
+      />
     </div>
   );
 }

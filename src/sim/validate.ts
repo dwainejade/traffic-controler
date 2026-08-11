@@ -11,7 +11,7 @@ import {
 import { illegalPairsInPhase } from "./conflicts";
 import { uncoveredMovements } from "./junction";
 import { laneLateralOffset } from "./network";
-import { junctionSize, nodeById, roadWidth, type LevelDef } from "./types";
+import { isGreenZone, junctionSize, nodeById, roadWidth, type LevelDef } from "./types";
 import { World } from "./world";
 
 /**
@@ -184,8 +184,8 @@ export function validateLevel(level: LevelDef): Validation {
     }
   }
 
-  // --- Zone polygons: parks are triangulated as THREE.Shape fills, so a
-  // self-intersecting park is a rendering hazard, not just an aesthetic one.
+  // --- Zone polygons: green zones are triangulated as THREE.Shape fills, so a
+  // self-intersecting one is a rendering hazard, not just an aesthetic one.
   for (const zone of level.zones) {
     if (!zone.polygon) continue;
     if (zone.polygon.length < 3) {
@@ -198,8 +198,15 @@ export function validateLevel(level: LevelDef): Validation {
         break;
       }
     }
-    if (zone.kind === "park" && !polygonIsSimple(zone.polygon)) {
-      errors.push(`zone ${zone.id}: park polygon self-intersects`);
+    /*
+     * A warning rather than an error, because these are no longer only
+     * authored: an imported area brings hundreds of surveyed rings and a few
+     * of them always cross themselves. `Parks` catches the triangulation
+     * failure and drops that one patch, so the map survives — this is here to
+     * say how many were lost, not to condemn the level.
+     */
+    if (isGreenZone(zone) && !polygonIsSimple(zone.polygon)) {
+      warnings.push(`zone ${zone.id}: ${zone.kind} polygon self-intersects, so it will not be drawn`);
     }
   }
 

@@ -45,6 +45,14 @@ export const PALETTE = {
 
   /** Park fill. Accent only — never base terrain. */
   park: '#93C97E',
+  /**
+   * Grass and amenity land — verges, cemeteries, recreation ground.
+   *
+   * A real import puts whole blocks of this on the map, so unlike `park` it is
+   * terrain and stays inside the environment's saturation ceiling. Sitting a
+   * tone off the parks is what keeps a park reading as a place you would go.
+   */
+  grass: '#C6D2B9',
   treeFoliage: '#79B463',
   treeFoliageDark: '#689C54',
   treeTrunk: '#8B7355',

@@ -21,25 +21,27 @@ const STEP = 0.025;
 const at = (n: number) => +(STEP * n).toFixed(4);
 
 export const LAYER = {
-  /** Kerb lip, under everything. */
-  curb: at(1),
-  junctionCurb: at(2),
+  /** Parks and grass: painted on the card, under the streets that cross them. */
+  green: at(1),
+  /** Kerb lip, under everything on the street side. */
+  curb: at(2),
+  junctionCurb: at(3),
   /** The carriageway itself. */
-  road: at(3),
-  busLane: at(4),
+  road: at(4),
+  busLane: at(5),
   /** Junction boxes, which cover the road ends tucked beneath them. */
-  junction: at(5),
+  junction: at(6),
   /** Congestion tint — over the surface, under the paint. */
-  pressure: at(6),
+  pressure: at(7),
   /** Bus stop boxes. */
-  stopBox: at(7),
+  stopBox: at(8),
   /** Paint: parking lines, then lane markings over them. */
-  parkingLine: at(8),
-  marking: at(9),
+  parkingLine: at(9),
+  marking: at(10),
   /** Headlight pools on the road. */
-  beam: at(10),
+  beam: at(11),
   /** Contact shadows, which belong over the paint a vehicle stands on. */
-  shadow: at(11),
+  shadow: at(12),
   /** Signal stop bars — the brightest thing down here, and always on top. */
-  stopBar: at(12),
+  stopBar: at(13),
 } as const;

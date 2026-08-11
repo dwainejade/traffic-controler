@@ -5,6 +5,7 @@ import type {
   NodeId,
   RoadClass,
   RoadDef,
+  ZoneDef,
 } from "../../sim/types";
 import {
   JUNCTION_MARGIN,
@@ -322,6 +323,45 @@ function buildingHeight(tags: Tags, id: number): number {
 
 /** Floor-to-floor, metres. */
 const STOREY = 3.2;
+
+/**
+ * Which green tone a way gets, or null if it is not green at all.
+ *
+ * The split is the one the palette cares about: `leisure` green is somewhere
+ * you would go — a park, a garden, a ball field — and gets the accent colour
+ * and trees. `landuse` green is the rest of it, and is terrain.
+ */
+function greenKind(tags: Tags): "park" | "grass" | null {
+  if (tags.building || tags.natural === "water") return null;
+  if (/^(park|garden|pitch)$/.test(tags.leisure ?? "")) return "park";
+  if (/^(grass|cemetery|recreation_ground)$/.test(tags.landuse ?? "")) return "grass";
+  return null;
+}
+
+/** A green patch smaller than this is a planter, not a place. */
+const MIN_GREEN_AREA = 40;
+
+/**
+ * Even-odd point-in-polygon, over an `{x, z}` loop.
+ *
+ * `scatter.ts` has the same function for the same reason, and this is a
+ * deliberate copy rather than an import: levels are built from OSM in Node as
+ * well as in the browser, and the level layer does not depend on the renderer.
+ */
+function pointInPoly(x: number, z: number, poly: P[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if (
+      a.z > z !== b.z > z &&
+      x < ((b.x - a.x) * (z - a.z)) / (b.z - a.z) + a.x
+    ) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
 
 // -------------------------------------------------------------------- import
 
@@ -794,6 +834,74 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     });
   }
 
+  /*
+   * --- 8. Green space.
+   *
+   * Same shape as the buildings above and for the same reasons: closed rings
+   * only, kept whole or not at all by centroid, clipped by nothing.
+   *
+   * The one addition is the containment pass. OSM routinely maps a park as a
+   * `leisure=park` boundary with `landuse=grass` lawns drawn inside it, and
+   * sometimes a `leisure=garden` inside those — drawing all three stamps a
+   * differently-coloured patch into the middle of the park. Largest first, and
+   * anything whose centroid lands in one already kept is the same ground being
+   * described twice.
+   */
+  type Green = { kind: "park" | "grass"; poly: P[]; area: number; id: number };
+  const green: Green[] = [];
+
+  for (const way of ways) {
+    const kind = way.tags && greenKind(way.tags);
+    if (!kind) continue;
+    const ring = way.nodes.slice(0, -1);
+    if (ring.length < 3) continue;
+    if (way.nodes[0] !== way.nodes[way.nodes.length - 1]) continue;
+    if (!ring.every((id) => rawNodes.has(id))) continue;
+
+    const poly = ring.map(at);
+    const cx = poly.reduce((s, p) => s + p.x, 0) / poly.length;
+    const cz = poly.reduce((s, p) => s + p.z, 0) / poly.length;
+    if (Math.abs(cx) > halfX + margin || Math.abs(cz) > halfZ + margin) continue;
+
+    const twice = signedArea2(poly);
+    const area = Math.abs(twice) / 2;
+    if (area < MIN_GREEN_AREA) continue;
+
+    green.push({
+      kind,
+      poly: twice < 0 ? [...poly].reverse() : poly,
+      area,
+      id: way.id,
+    });
+  }
+
+  green.sort((a, b) => b.area - a.area);
+
+  const zones: ZoneDef[] = [];
+  const keptGreen: Green[] = [];
+  for (const g of green) {
+    const cx = g.poly.reduce((s, p) => s + p.x, 0) / g.poly.length;
+    const cz = g.poly.reduce((s, p) => s + p.z, 0) / g.poly.length;
+    // Quadratic, but there are a couple of hundred of these at the very most.
+    if (keptGreen.some((k) => pointInPoly(cx, cz, k.poly))) continue;
+    keptGreen.push(g);
+
+    const xs = g.poly.map((p) => p.x);
+    const zs = g.poly.map((p) => p.z);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minZ = Math.min(...zs);
+    const maxZ = Math.max(...zs);
+
+    zones.push({
+      id: `green${g.id}`,
+      kind: g.kind,
+      centre: [(minX + maxX) / 2, (minZ + maxZ) / 2],
+      half: [(maxX - minX) / 2, (maxZ - minZ) / 2],
+      polygon: g.poly.map((p) => [p.x, p.z] as [number, number]),
+    });
+  }
+
   return {
     id: opts.id,
     name: opts.name,
@@ -802,7 +910,7 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     half: Math.max(halfX, halfZ, outermost + 10),
     nodes,
     roads,
-    zones: [],
+    zones,
     seed: opts.seed ?? 20260810,
     quota: 0,
     timeLimit: 0,

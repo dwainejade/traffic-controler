@@ -82,26 +82,27 @@ export function Controls({ level }: { level: LevelDef }) {
     const forward = new THREE.Vector3();
     const pivot = new THREE.Vector3();
 
-    const groundUnderPointer = (e: WheelEvent, out: THREE.Vector3) => {
+    const groundUnderPointer = (x: number, y: number, out: THREE.Vector3) => {
       const rect = el.getBoundingClientRect();
       ndc.set(
-        ((e.clientX - rect.left) / rect.width) * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+        ((x - rect.left) / rect.width) * 2 - 1,
+        -((y - rect.top) / rect.height) * 2 + 1,
       );
       raycaster.setFromCamera(ndc, camera);
       return raycaster.ray.intersectPlane(plane, out);
     };
 
-    const onWheel = (e: WheelEvent) => {
+    /**
+     * Zoom by `scale`, keeping whatever is under (x, y) under it.
+     *
+     * Shared by the wheel and by pinch, because they are the same gesture with
+     * different hardware: a multiplier, and a point on screen it happens about.
+     */
+    const zoomAbout = (scale: number, x: number, y: number) => {
       const controls = ref.current;
       if (!controls || !controls.enabled) return;
-      e.preventDefault();
 
-      // Line- and page-mode wheels report in far smaller units than pixels.
-      const lines = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1;
-      const scale = Math.exp(-e.deltaY * lines * 0.0016);
-
-      const anchored = groundUnderPointer(e, before) !== null;
+      const anchored = groundUnderPointer(x, y, before) !== null;
 
       if (camera instanceof THREE.OrthographicCamera) {
         const next = THREE.MathUtils.clamp(camera.zoom * scale, minZoom, maxZoom);
@@ -109,7 +110,7 @@ export function Controls({ level }: { level: LevelDef }) {
         camera.zoom = next;
         camera.updateProjectionMatrix();
 
-        if (anchored && groundUnderPointer(e, after)) {
+        if (anchored && groundUnderPointer(x, y, after)) {
           const dx = before.x - after.x;
           const dz = before.z - after.z;
           controls.target.x += dx;
@@ -141,8 +142,79 @@ export function Controls({ level }: { level: LevelDef }) {
       controls.update();
     };
 
+    const onWheel = (e: WheelEvent) => {
+      const controls = ref.current;
+      if (!controls || !controls.enabled) return;
+      e.preventDefault();
+
+      // Line- and page-mode wheels report in far smaller units than pixels.
+      const lines = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1;
+      zoomAbout(Math.exp(-e.deltaY * lines * 0.0016), e.clientX, e.clientY);
+    };
+
+    /*
+     * Pinch.
+     *
+     * OrbitControls' own two-finger dolly is off along with the rest of its
+     * zooming — it only ever zooms about its target, which on a city means the
+     * thing you are pinching towards slides out of frame — so the gesture is
+     * tracked here and fed through the same anchored zoom the wheel uses. Two
+     * fingers still reach OrbitControls, where they orbit: spreading them zooms
+     * and turning them rotates, which is how every map behaves.
+     */
+    const touches = new Map<number, { x: number; y: number }>();
+    let pinchDistance = 0;
+
+    const spread = () => {
+      const [a, b] = [...touches.values()];
+      return {
+        distance: Math.hypot(a.x - b.x, a.y - b.y),
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2,
+      };
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) pinchDistance = spread().distance;
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (e.pointerType !== "touch" || !touches.has(e.pointerId)) return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size !== 2) return;
+
+      const { distance, x, y } = spread();
+      // Fingers landing at almost the same point make the first ratio enormous.
+      if (pinchDistance < 12 || distance < 12) {
+        pinchDistance = distance;
+        return;
+      }
+      zoomAbout(distance / pinchDistance, x, y);
+      pinchDistance = distance;
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      touches.delete(e.pointerId);
+      // Lifting one of three fingers leaves a new pair at a new spread; measure
+      // it fresh rather than scaling by the jump.
+      if (touches.size === 2) pinchDistance = spread().distance;
+    };
+
     el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove);
+    el.addEventListener("pointerup", onPointerUp);
+    el.addEventListener("pointercancel", onPointerUp);
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("pointermove", onPointerMove);
+      el.removeEventListener("pointerup", onPointerUp);
+      el.removeEventListener("pointercancel", onPointerUp);
+    };
   }, [camera, gl, minZoom, maxZoom, minDistance, maxDistance]);
 
   /*
@@ -283,6 +355,13 @@ export function Controls({ level }: { level: LevelDef }) {
       // Zoom is handled above so it can track the pointer; OrbitControls only
       // ever zooms about its target.
       enableZoom={false}
+      /*
+       * On touch, one finger pans and two orbit — the map reading of the
+       * gesture, and the opposite way round from the mouse, where dragging
+       * rotates. Pinch is handled above and rides on top of the two-finger
+       * orbit, so spreading zooms while turning rotates.
+       */
+      touches={{ ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.ROTATE }}
       enablePan
       screenSpacePanning={false}
       rotateSpeed={0.6}

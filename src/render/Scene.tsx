@@ -4,6 +4,7 @@ import * as THREE from "three";
 import type { LevelDef } from "../sim/types";
 import { Daylight } from "./Daylight";
 import { Ground } from "./Ground";
+import { Parks } from "./Parks";
 import { RoadNetwork } from "./RoadNetwork";
 import { Buildings } from "./Buildings";
 import { Footprints } from "./Footprints";
@@ -245,6 +246,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       <Controls level={level} />
 
       <Ground level={level} />
+      <Parks zones={level.zones} />
       <RoadNetwork level={level} />
       {showLabels && <StreetLabels level={level} />}
       {/* Surveyed outlines where the level has them, scattered boxes otherwise. */}

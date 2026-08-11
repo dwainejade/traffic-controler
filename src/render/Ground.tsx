@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import * as THREE from 'three'
 import { PALETTE } from '../art/palette'
 import type { LevelDef } from '../sim/types'
-import { flatPolygon, flatRoundedRect, roundedRectShape } from './geometry'
+import { roundedRectShape } from './geometry'
 
 const CARD_THICKNESS = 2.5
 
@@ -48,20 +48,6 @@ export function Ground({ level }: { level: LevelDef }) {
     return g
   }, [level.half, level.island])
 
-  const parks = useMemo(
-    () =>
-      level.zones
-        .filter((z) => z.kind === 'park')
-        .map((z) => ({
-          id: z.id,
-          // A polygon park carries world coordinates in its vertices; a rect
-          // park is a unit shape placed at its centre.
-          geom: z.polygon ? flatPolygon(z.polygon) : flatRoundedRect(z.half[0], z.half[1], 8),
-          pos: z.polygon ? ([0, 0] as [number, number]) : z.centre,
-        })),
-    [level.zones],
-  )
-
   return (
     <group>
       {/*
@@ -86,17 +72,6 @@ export function Ground({ level }: { level: LevelDef }) {
       <mesh geometry={card} castShadow receiveShadow>
         <meshLambertMaterial color={PALETTE.ground} />
       </mesh>
-
-      {parks.map((p) => (
-        <mesh
-          key={p.id}
-          geometry={p.geom}
-          position={[p.pos[0], 0.008, p.pos[1]]}
-          receiveShadow
-        >
-          <meshLambertMaterial color={PALETTE.park} />
-        </mesh>
-      ))}
     </group>
   )
 }

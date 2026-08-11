@@ -4,9 +4,13 @@ import { importOsm, type OsmFile } from "./import";
 /**
  * Every cached area, as a level.
  *
- * Adding a place is one command and no code:
+ * These are the areas that ship with the game. Adding one is one command and
+ * no code:
  *
- *   node tools/fetchOsm.mjs shibuya --address "Shibuya Crossing, Tokyo"
+ *   node tools/fetchOsm.ts shibuya --address "Shibuya Crossing, Tokyo"
+ *
+ * Areas the player imports themselves never come through here — they are
+ * fetched at runtime and kept in the browser; see `importArea.ts`.
  *
  * The glob picks the new JSON up on the next dev reload. `AREAS` below only
  * exists to give a file a nicer display name or its own traffic settings; an

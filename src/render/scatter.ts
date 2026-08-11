@@ -33,6 +33,15 @@ export function pointInPolygon(x: number, z: number, poly: [number, number][]): 
   return inside
 }
 
+/** Area of an [x, z] loop, by the shoelace formula. */
+function polygonArea(poly: [number, number][]): number {
+  let sum = 0
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    sum += poly[j][0] * poly[i][1] - poly[i][0] * poly[j][1]
+  }
+  return Math.abs(sum) / 2
+}
+
 /**
  * Uniform grid over every obstacle a scattered prop must avoid.
  *
@@ -256,16 +265,49 @@ export function scatterLevel(level: LevelDef): {
     }
   }
 
-  // --- Dense scatter inside parks.
+  /*
+   * --- Dense scatter inside parks. Not grass: that tone is meant to read as
+   * open ground, and planting it would make every verge a wood.
+   */
   for (const zone of level.zones) {
     if (zone.kind !== 'park') continue
     const [cx, cz] = zone.centre
     const [hx, hz] = zone.half
+
+    if (zone.polygon) {
+      /*
+       * A surveyed park is nothing like an authored rect. An import brings a
+       * hundred and sixty of them, most thin strips laid diagonally along a
+       * street, whose bounding boxes are several times their area — so the
+       * count comes from the true area, and the sampling gets an attempt cap
+       * so a sliver with a 10% acceptance rate still terminates.
+       */
+      const area = polygonArea(zone.polygon)
+      if (area < 90) continue // smaller than this is a planter
+      const count = Math.min(120, Math.round(area / 42))
+      let placed = 0
+      for (let i = 0; i < count * 6 && placed < count; i++) {
+        const x = cx + (rand() * 2 - 1) * hx
+        const z = cz + (rand() * 2 - 1) * hz
+        if (!pointInPolygon(x, z, zone.polygon)) continue
+        if (!isClear(level, x, z, 3)) continue
+        placed++
+        trees.push({
+          x,
+          z,
+          scale: 1.9 + rand() * 1.6,
+          rot: rand() * Math.PI * 2,
+          dark: rand() < 0.4,
+        })
+      }
+      continue
+    }
+
+    // Authored rects keep the density they were tuned at.
     const count = Math.floor((hx * hz) / 26)
     for (let i = 0; i < count; i++) {
       const x = cx + (rand() * 2 - 1) * (hx - 3)
       const z = cz + (rand() * 2 - 1) * (hz - 3)
-      if (zone.polygon && !pointInPolygon(x, z, zone.polygon)) continue
       if (!isClear(level, x, z, 3)) continue
       trees.push({
         x,

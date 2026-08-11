@@ -132,7 +132,12 @@ export type RoadDef = {
 
 export type ZoneDef = {
   id: string
-  kind: 'park' | 'block'
+  /**
+   * `park` is amenity green — mown, planted, walked in — and reads as an accent
+   * with trees in it. `grass` is the leftover kind: verges, cemeteries, the
+   * strip beside a school. Same family, a tone apart, and only parks get trees.
+   */
+  kind: 'park' | 'grass' | 'block'
   /** Axis-aligned rect: centre [x, z] plus half-extents [hx, hz]. */
   centre: [number, number]
   half: [number, number]
@@ -143,6 +148,17 @@ export type ZoneDef = {
    * including curved ones — become city blocks.
    */
   polygon?: [number, number][]
+}
+
+/**
+ * Anything drawn as vegetation.
+ *
+ * `kind` is only ever compared with `===` — there is no exhaustive switch on it
+ * anywhere — so adding a member is invisible to the type checker. Route new
+ * green-vs-not tests through here rather than growing another comparison.
+ */
+export function isGreenZone(zone: ZoneDef): boolean {
+  return zone.kind === 'park' || zone.kind === 'grass'
 }
 
 /**

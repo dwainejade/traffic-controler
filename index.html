@@ -3,7 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      viewport-fit=cover so the map runs under the notch and the home
+      indicator; the HUD pads itself back out with env(safe-area-inset-*).
+      Page zoom is left alone on purpose — the canvas claims its own gestures
+      through touch-action, so pinching the map never reaches the browser, and
+      pinching the panels should still do what it always does.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <title>traffic-controler</title>
   </head>
   <body>

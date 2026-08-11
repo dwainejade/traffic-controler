@@ -1,0 +1,304 @@
+.levels {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+/* The one thing in the corner: where you are, and the way to somewhere else. */
+.level-button {
+  position: static;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 15px;
+  border: 0;
+  color: #2c3036;
+  cursor: pointer;
+  max-width: min(62vw, 320px);
+}
+
+.level-button:hover {
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.level-button.is-open {
+  background: #2c3036;
+  color: #fff;
+}
+
+.level-button-name {
+  font-size: 15px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Desktop: a popover hanging under the button. Mobile uses <Sheet> instead. */
+.level-menu {
+  position: static;
+  width: 340px;
+  max-height: min(72vh, 640px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px;
+}
+
+.level-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.level-head {
+  padding: 2px 2px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #6b7078;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.level-empty {
+  padding: 2px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #6b7078;
+}
+
+.level-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 10px;
+}
+
+.level-row:hover {
+  background: rgba(120, 130, 145, 0.1);
+}
+
+.level-row.is-current {
+  background: rgba(44, 48, 54, 0.1);
+  box-shadow: inset 0 0 0 1.5px rgba(44, 48, 54, 0.3);
+}
+
+.level-pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.level-pick.is-stacked {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.level-pick.is-stacked .level-detail {
+  margin-left: 0;
+}
+
+.level-name {
+  max-width: 100%;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.level-detail {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: #8a9099;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Deleting an area is the one destructive thing in this menu, so it asks: the
+ * first tap turns the button into the question, the second answers it. A blur
+ * puts it back, which is what tapping anywhere else does.
+ */
+.level-delete {
+  flex: none;
+  min-width: 28px;
+  height: 28px;
+  margin-right: 6px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font: 600 13px/1 inherit;
+  font-family: inherit;
+  color: #8a9099;
+  cursor: pointer;
+}
+
+.level-delete:hover {
+  background: rgba(232, 80, 58, 0.14);
+  color: #c2371f;
+}
+
+.level-delete.is-confirming {
+  background: #e8503a;
+  color: #fff;
+  font-size: 11px;
+}
+
+/* --- The import form ------------------------------------------------------- */
+
+.import-form {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding-top: 2px;
+}
+
+.import-row {
+  display: flex;
+  gap: 8px;
+}
+
+.import-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b7078;
+}
+
+.import-field input:not([type="range"]) {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid rgba(90, 100, 115, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.75);
+  font: 600 13px/1.2 inherit;
+  font-family: inherit;
+  color: #2c3036;
+  /* 16px or larger, or iOS Safari zooms the page when the field takes focus. */
+  font-size: max(13px, 1rem);
+}
+
+.import-field input:disabled {
+  opacity: 0.55;
+}
+
+.import-field.is-slider {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.import-field.is-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: #2c3036;
+}
+
+.import-field.is-slider b {
+  min-width: 46px;
+  text-align: right;
+  font-size: 12px;
+  color: #2c3036;
+  font-variant-numeric: tabular-nums;
+}
+
+.import-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: #8a9099;
+}
+
+.import-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.import-busy {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  color: #5c626b;
+}
+
+.import-busy > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+
+.import-spinner {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid rgba(90, 100, 115, 0.25);
+  border-top-color: #2c3036;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.import-error {
+  padding: 9px 11px;
+  border-radius: 9px;
+  background: rgba(232, 80, 58, 0.12);
+  font-size: 12px;
+  line-height: 1.45;
+  color: #a8351f;
+}
+
+.import-error summary {
+  margin-top: 5px;
+  font-size: 11px;
+  color: #8a9099;
+  cursor: pointer;
+}
+
+.import-error pre {
+  margin-top: 4px;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 10px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  color: #6b7078;
+}
+
+@media (max-width: 760px) {
+  .levels {
+    top: 12px;
+    left: 12px;
+  }
+
+  .level-menu {
+    width: auto;
+  }
+}
