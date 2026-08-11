@@ -33,7 +33,9 @@ export function Daylight({ level, world }: { level: LevelDef; world: World }) {
 
   const scene = useThree((s) => s.scene);
   const camera = useThree((s) => s.camera);
-  const controls = useThree((s) => s.controls) as { target: THREE.Vector3 } | null;
+  const controls = useThree((s) => s.controls) as {
+    target: THREE.Vector3;
+  } | null;
 
   const cycle = useHud((s) => s.layers.daynight);
 
@@ -89,7 +91,7 @@ export function Daylight({ level, world }: { level: LevelDef; world: World }) {
     const distance = target
       ? camera.position.distanceTo(target)
       : camera.position.length();
-    const span = level.half * 1.5;
+    const span = level.half * 0.5;
     fog.color.copy(sample.air);
     fog.near = Math.max(0, distance - span);
     // At haze 0 the far plane is pushed so far back that nothing reaches it.

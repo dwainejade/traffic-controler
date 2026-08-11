@@ -4,7 +4,14 @@ import * as THREE from "three";
 import { INDICATOR, SIGNAL, VEHICLE_COLORS } from "../art/palette";
 import { SKY } from "../art/daylight";
 import { VEHICLE, type World } from "../sim/world";
-import { UNIT_PLANE, blobTexture, bodyGeometry, glowTexture } from "./vehicleArt";
+import {
+  UNIT_PLANE,
+  blobTexture,
+  bodyGeometry,
+  carBodyGeometry,
+  glowTexture,
+  truckBodyGeometry,
+} from "./vehicleArt";
 import { LAYER } from "./layers";
 import { sampleLane } from "../sim/network";
 import { LANE_WIDTH } from "../sim/types";
@@ -28,8 +35,29 @@ const MAX_STEPS_PER_FRAME = 1200;
  * instanced draw calls either way.
  */
 const MAX_CARS = 2400;
+/**
+ * Instance budgets for trucks and buses, each split into its own mesh so cars
+ * don't pay for cabin geometry they don't have and trucks/buses don't pay for
+ * cab/box geometry a car has no use for — three draw calls instead of one.
+ * Trucks are 7% of spawns and buses trickle in on a 120s headway, so even at
+ * `MAX_CARS` demand neither gets close to its cap.
+ */
+const MAX_TRUCKS = 300;
+const MAX_BUSES = 200;
 
 const HUD_INTERVAL = 1 / 6;
+
+/**
+ * Purely cosmetic pull-back for the painted stop bar, on top of `lane.stopS`.
+ *
+ * `stopS` already sits `STOP_BAR_GAP` (0.8m) past the crosswalk, which is
+ * where cars actually stop — but the bar itself is 0.85m deep, so its own
+ * near edge lands back at the crosswalk's outer stripe with only a few
+ * centimetres to spare. On screen that reads as the bar sitting inside the
+ * crosswalk rather than behind it. This only moves the paint; the sim still
+ * stops cars at the unpadded `lane.stopS`.
+ */
+const BAR_VISUAL_SETBACK = 1.2;
 
 /** Indicators flash at roughly 1.5 Hz, as real ones do. */
 const BLINK_HZ = 1.5;
@@ -39,8 +67,16 @@ const MAX_INDICATORS = MAX_CARS * 2;
 /**
  * A car's own right-hand side is local -X: heading is atan2(dx, dz), so local
  * +Z is forward and rotating +X by that heading lands on the driver's left.
+ * Sized as a small corner-mounted lamp, not a strip — it used to be 0.5m deep
+ * fore-aft, which read as a body-side trim piece rather than an indicator.
  */
-const INDICATOR_GEOM = new THREE.BoxGeometry(0.22, 0.26, 0.5);
+const INDICATOR_GEOM = new THREE.BoxGeometry(0.2, 0.2, 0.18);
+/**
+ * Where the indicator sits: same height band as the head/tail lamps, and just
+ * inboard of them along the body so the two don't overlap at the corner.
+ */
+const INDICATOR_ALONG = 0.5;
+const INDICATOR_HEIGHT = 0.44;
 
 /**
  * Lamps, for after dark. Two at each end of every car, plus one soft pool of
@@ -66,7 +102,9 @@ const HEADLAMP = "#FFF4DA";
 const TAILLAMP = "#FF3A2E";
 
 export function Simulation({ world }: { world: World }) {
-  const bodies = useRef<THREE.InstancedMesh>(null);
+  const carBodies = useRef<THREE.InstancedMesh>(null);
+  const truckBodies = useRef<THREE.InstancedMesh>(null);
+  const busBodies = useRef<THREE.InstancedMesh>(null);
   const shadows = useRef<THREE.InstancedMesh>(null);
   const bars = useRef<THREE.InstancedMesh>(null);
   const blinkers = useRef<THREE.InstancedMesh>(null);
@@ -78,7 +116,9 @@ export function Simulation({ world }: { world: World }) {
   const hudTimer = useRef(0);
   const speed = useHud((s) => s.speed);
 
-  const geom = useMemo(() => bodyGeometry(), []);
+  const carGeom = useMemo(() => carBodyGeometry(), []);
+  const truckGeom = useMemo(() => truckBodyGeometry(), []);
+  const busGeom = useMemo(() => bodyGeometry(), []);
   const blob = useMemo(() => blobTexture(), []);
   const glow = useMemo(() => glowTexture(), []);
 
@@ -98,7 +138,7 @@ export function Simulation({ world }: { world: World }) {
     const p = { x: 0, z: 0, angle: 0 };
 
     approaches.forEach((lane, i) => {
-      sampleLane(lane, lane.stopS, p);
+      sampleLane(lane, Math.max(0, lane.stopS - BAR_VISUAL_SETBACK), p);
       q.setFromAxisAngle(up, p.angle);
       m.compose(
         new THREE.Vector3(p.x, LAYER.stopBar, p.z),
@@ -130,9 +170,11 @@ export function Simulation({ world }: { world: World }) {
     if (steps >= MAX_STEPS_PER_FRAME) accumulator.current = 0;
 
     // --- Cars.
-    const body = bodies.current;
+    const carBody = carBodies.current;
+    const truckBody = truckBodies.current;
+    const busBody = busBodies.current;
     const shadow = shadows.current;
-    if (body && shadow) {
+    if (carBody && truckBody && busBody && shadow) {
       const m = new THREE.Matrix4();
       const sm = new THREE.Matrix4();
       const q = new THREE.Quaternion();
@@ -163,6 +205,9 @@ export function Simulation({ world }: { world: World }) {
       const now = world.stats.elapsed;
 
       let n = 0;
+      let nCar = 0;
+      let nTruck = 0;
+      let nBus = 0;
       let lamps = 0;
       for (const car of world.cars) {
         if (!car.active || n >= MAX_CARS) continue;
@@ -175,12 +220,6 @@ export function Simulation({ world }: { world: World }) {
 
         bodyScale.set(spec.width, spec.height, spec.length);
         m.compose(pos, q, bodyScale);
-        body.setMatrixAt(n, m);
-
-        pos.y = LAYER.shadow;
-        shadowScale.set(spec.width * 2.1, 1, spec.length * 1.5);
-        sm.compose(pos, q, shadowScale);
-        shadow.setMatrixAt(n, sm);
 
         // A livery overrides the fleet distribution: a bus is blue because it is
         // a bus, not because the palette rolled that way.
@@ -189,7 +228,29 @@ export function Simulation({ world }: { world: World }) {
             ? VEHICLE_COLORS[car.colour % VEHICLE_COLORS.length].hex
             : spec.colour,
         );
-        body.setColorAt(n, colour);
+
+        // Each kind has its own mesh — a car's cabin, a truck's cab-and-box,
+        // a bus's plain shell — so none pays for geometry it doesn't use.
+        if (car.kind === "car") {
+          carBody.setMatrixAt(nCar, m);
+          carBody.setColorAt(nCar, colour);
+          nCar++;
+        } else if (car.kind === "truck") {
+          if (nTruck < MAX_TRUCKS) {
+            truckBody.setMatrixAt(nTruck, m);
+            truckBody.setColorAt(nTruck, colour);
+            nTruck++;
+          }
+        } else if (nBus < MAX_BUSES) {
+          busBody.setMatrixAt(nBus, m);
+          busBody.setColorAt(nBus, colour);
+          nBus++;
+        }
+
+        pos.y = LAYER.shadow;
+        shadowScale.set(spec.width * 2.1, 1, spec.length * 1.5);
+        sm.compose(pos, q, shadowScale);
+        shadow.setMatrixAt(n, sm);
         n++;
 
         // Heading, reused by every lamp on this car.
@@ -235,10 +296,13 @@ export function Simulation({ world }: { world: World }) {
 
         // Driver's right is local -X.
         const side = (turn === "right" ? -1 : 1) * (spec.width / 2);
-        for (const along of [spec.length * 0.42, -spec.length * 0.42]) {
+        for (const along of [
+          spec.length * INDICATOR_ALONG,
+          -spec.length * INDICATOR_ALONG,
+        ]) {
           lampPos.set(
             p.x + fx * along + fz * side,
-            spec.height * 0.56,
+            spec.height * INDICATOR_HEIGHT,
             p.z + fz * along - fx * side,
           );
           lamp.compose(lampPos, q, one);
@@ -246,11 +310,17 @@ export function Simulation({ world }: { world: World }) {
         }
       }
 
-      body.count = n;
+      carBody.count = nCar;
+      truckBody.count = nTruck;
+      busBody.count = nBus;
       shadow.count = n;
-      body.instanceMatrix.needsUpdate = true;
+      carBody.instanceMatrix.needsUpdate = true;
+      truckBody.instanceMatrix.needsUpdate = true;
+      busBody.instanceMatrix.needsUpdate = true;
       shadow.instanceMatrix.needsUpdate = true;
-      if (body.instanceColor) body.instanceColor.needsUpdate = true;
+      if (carBody.instanceColor) carBody.instanceColor.needsUpdate = true;
+      if (truckBody.instanceColor) truckBody.instanceColor.needsUpdate = true;
+      if (busBody.instanceColor) busBody.instanceColor.needsUpdate = true;
 
       // Sun shadows fade out with the sun, so the fake contact blobs have to go
       // with them — a hard blob under a car at midnight is the tell.
@@ -319,7 +389,13 @@ export function Simulation({ world }: { world: World }) {
         <meshBasicMaterial map={blob} transparent depthWrite={false} />
       </instancedMesh>
 
-      <instancedMesh ref={bodies} args={[geom, undefined, MAX_CARS]} castShadow>
+      <instancedMesh ref={carBodies} args={[carGeom, undefined, MAX_CARS]} castShadow>
+        <meshLambertMaterial vertexColors />
+      </instancedMesh>
+      <instancedMesh ref={truckBodies} args={[truckGeom, undefined, MAX_TRUCKS]} castShadow>
+        <meshLambertMaterial vertexColors />
+      </instancedMesh>
+      <instancedMesh ref={busBodies} args={[busGeom, undefined, MAX_BUSES]} castShadow>
         <meshLambertMaterial vertexColors />
       </instancedMesh>
 

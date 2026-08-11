@@ -1,9 +1,6 @@
 import { useLayoutEffect, useMemo, useRef } from "react";
-import * as THREE from "three";
-import { Text } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import { SIGNAL } from "../art/palette";
-import { timeToNextGreen } from "../sim/junction";
+import * as THREE from "three";
 import { rightOf } from "../sim/network";
 import type { LaneId } from "../sim/network";
 import {
@@ -13,19 +10,17 @@ import {
   type LevelDef,
   type NodeId,
 } from "../sim/types";
+import { SIGNAL } from "../art/palette";
 import type { World } from "../sim/world";
 
 /**
  * Signal heads: a pole at the kerb, bent through ninety degrees over the road,
- * carrying a lit panel that shows this approach's colour and the seconds until
- * it changes.
+ * carrying a lit panel that shows this approach's colour.
  *
  * The point is legibility rather than decoration. Coloured stop bars painted on
  * the road say what the signal is doing, but not *whose* signal it is — at a
  * five-arm junction you cannot tell which bar belongs to the approach you are
- * looking at. A head standing over its own approach can only mean one thing,
- * and the countdown turns a phase plan from something you infer by watching
- * into something you can read.
+ * looking at. A head standing over its own approach can only mean one thing.
  */
 
 /** Metres. */
@@ -212,10 +207,6 @@ export function SignalHeads({
 
   const panels = useRef<THREE.InstancedMesh>(null);
   const strips = useRef<THREE.InstancedMesh>(null);
-  type Glyph = THREE.Object3D & { text: string; sync: () => void };
-  const digits = useRef<Glyph[]>([]);
-  const backs = useRef<Glyph[]>([]);
-  const shown = useRef<string[]>([]);
 
   useLayoutEffect(() => {
     const m = new THREE.Matrix4();
@@ -248,7 +239,6 @@ export function SignalHeads({
       strips.current.instanceMatrix.needsUpdate = true;
       strips.current.computeBoundingSphere();
     }
-    shown.current = heads.map(() => "");
   }, [heads]);
 
   useFrame(() => {
@@ -279,32 +269,6 @@ export function SignalHeads({
       colour.set(SIGNAL[state]);
       panels.current?.setColorAt(i, colour);
       strips.current?.setColorAt(i, colour);
-
-      /*
-       * Green counts its own time down; red counts down to this approach's next
-       * green, not to the end of whatever phase happens to be running. On a
-       * four-phase junction those differ by most of a cycle, and the second
-       * number is the one a driver — or a player deciding whether this approach
-       * is starved — actually wants.
-       */
-      const seconds =
-        state === "green"
-          ? junction.timer
-          : timeToNextGreen(junction, world.programOf(junction), (p) =>
-              junction.phases[p].connectors.some((c) =>
-                head.connectors.includes(c),
-              ),
-            );
-
-      const text = String(Math.max(0, Math.ceil(seconds)));
-      if (shown.current[i] !== text) {
-        shown.current[i] = text;
-        for (const face of [digits.current[i], backs.current[i]]) {
-          if (!face) continue;
-          face.text = text;
-          face.sync();
-        }
-      }
     });
 
     if (panels.current?.instanceColor)
@@ -332,51 +296,6 @@ export function SignalHeads({
       <instancedMesh ref={strips} args={[STRIP_GEOM, undefined, heads.length]}>
         <meshBasicMaterial />
       </instancedMesh>
-
-      {/*
-        The number is printed on both faces of the panel.
-
-        A real head faces only the traffic it governs, and from a fixed
-        three-quarter camera that means roughly half of them are seen from
-        behind — where the digits come out mirrored and unreadable. Since the
-        whole point of the countdown is that the player can read it without
-        first orbiting the map, both faces carry it.
-      */}
-      {heads.map((head, i) =>
-        [1, -1].map((face) => (
-          <Text
-            key={`${head.key}_${face}`}
-            ref={(node) => {
-              if (node && face === 1) digits.current[i] = node as never;
-              if (node && face === -1) backs.current[i] = node as never;
-            }}
-            /*
-             * Text faces its own +Z, which a Y rotation of `facing` points
-             * along the arm at the oncoming drivers. Each copy must therefore
-             * sit just *in front of* the panel along that same direction —
-             * offsetting the other way buries the readable copy inside the
-             * panel and leaves only the reversed one showing, which is how the
-             * countdowns came out mirrored.
-             */
-            position={[
-              head.panel.x +
-                Math.sin(head.facing) * face * (PANEL_D / 2 + 0.02),
-              head.panel.y,
-              head.panel.z +
-                Math.cos(head.facing) * face * (PANEL_D / 2 + 0.02),
-            ]}
-            rotation={[0, head.facing + (face === 1 ? 0 : Math.PI), 0]}
-            fontSize={PANEL_H * 0.74}
-            // Dark digits punched out of the lit panel, as on a real LED matrix
-            // head — the panel is what glows, the number is where it does not.
-            color="#15181B"
-            anchorX="center"
-            anchorY="middle"
-          >
-            {" "}
-          </Text>
-        )),
-      )}
     </group>
   );
 }

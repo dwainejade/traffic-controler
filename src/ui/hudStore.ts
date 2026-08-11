@@ -39,6 +39,8 @@ export type LayerState = {
   parking: boolean;
   /** Swap the fixed orthographic camera for a perspective one. */
   perspective: boolean;
+  /** Blur what the player isn't looking at. */
+  depthOfField: boolean;
 };
 
 export type LayerName = keyof LayerState;
@@ -65,6 +67,11 @@ export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
     name: "perspective",
     label: "Perspective camera",
     hint: "Street-level view, with real vanishing points. Off is the flat model view",
+  },
+  {
+    name: "depthOfField",
+    label: "Depth of field",
+    hint: "Blur what you aren't looking at, like a tilt-shift model photo",
   },
 ];
 
@@ -130,10 +137,11 @@ export const useHud = create<HudState>(() => ({
   demand: 1,
   layers: {
     labels: true,
-    signals: true,
+    signals: false,
     daynight: true,
     parking: true,
     perspective: true,
+    depthOfField: true,
   },
   timeOfDay: hourOfDay(0),
   state: "running",

@@ -1,6 +1,8 @@
-import { useEffect, useMemo } from "react";
-import { Canvas, useThree } from "@react-three/fiber";
+import { useEffect, useMemo, useRef } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
+import { DepthOfField, EffectComposer } from "@react-three/postprocessing";
+import type { DepthOfFieldEffect } from "postprocessing";
 import type { LevelDef } from "../sim/types";
 import { Daylight } from "./Daylight";
 import { Ground } from "./Ground";
@@ -174,12 +176,46 @@ function DevHandle() {
   return null;
 }
 
+/**
+ * Depth of field, focused on whatever the orbit controls are pivoting
+ * around — the thing the player is actually looking at stays sharp, and
+ * everything nearer or farther falls away.
+ *
+ * The circle-of-confusion math reconstructs a real view-space distance for
+ * either projection (`orthographicDepthToViewZ` under the fixed 3/4 camera,
+ * `perspectiveDepthToViewZ` under the street-level one), so the same effect
+ * works for both without a separate ortho-only technique.
+ */
+function PostFX() {
+  const controls = useThree(
+    (s) => s.controls as unknown as { target: THREE.Vector3 } | null,
+  );
+  const dof = useRef<DepthOfFieldEffect>(null);
+
+  useFrame(() => {
+    if (dof.current?.target && controls)
+      dof.current.target.copy(controls.target);
+  });
+
+  return (
+    <EffectComposer multisampling={4}>
+      <DepthOfField
+        ref={dof}
+        target={[0, 0, 0]}
+        focusRange={200}
+        bokehScale={1.4}
+      />
+    </EffectComposer>
+  );
+}
+
 export function Scene({ level, world }: { level: LevelDef; world: World }) {
   const { buildings, trees } = useMemo(() => scatterLevel(level), [level]);
   const showLabels = useHud((s) => s.layers.labels);
   const showSignals = useHud((s) => s.layers.signals);
   const showParking = useHud((s) => s.layers.parking);
   const perspective = useHud((s) => s.layers.perspective);
+  const depthOfField = useHud((s) => s.layers.depthOfField);
 
   /*
    * Frame the whole map whatever its size, so a 49-junction city opens showing
@@ -263,6 +299,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       <Simulation world={world} />
       <JunctionPicker level={level} world={world} />
       <CrashFocus world={world} />
+      {depthOfField && <PostFX />}
     </Canvas>
   );
 }

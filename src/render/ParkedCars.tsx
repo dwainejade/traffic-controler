@@ -4,7 +4,7 @@ import * as THREE from "three";
 import { VEHICLE_COLORS } from "../art/palette";
 import { SKY } from "../art/daylight";
 import { VEHICLE, type World } from "../sim/world";
-import { UNIT_PLANE, blobTexture, bodyGeometry } from "./vehicleArt";
+import { UNIT_PLANE, blobTexture, carBodyGeometry } from "./vehicleArt";
 import { LAYER } from "./layers";
 
 /**
@@ -37,7 +37,7 @@ export function ParkedCars({ world }: { world: World }) {
   const bodies = useRef<THREE.InstancedMesh>(null);
   const shadows = useRef<THREE.InstancedMesh>(null);
 
-  const geom = useMemo(() => bodyGeometry(), []);
+  const geom = useMemo(() => carBodyGeometry(), []);
   const blob = useMemo(() => blobTexture(), []);
 
   const { slots } = world.parking;
