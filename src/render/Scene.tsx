@@ -14,6 +14,7 @@ import { Trees } from "./Trees";
 import { scatterLevel } from "./scatter";
 import { Controls } from "./Controls";
 import { CinematicCamera } from "./CinematicCamera";
+import { MAX_ZOOM, MIN_DISTANCE, maxDistance, minZoom } from "./cameraLimits";
 import { BusStops } from "./BusStops";
 import { ParkedCars } from "./ParkedCars";
 import { Simulation } from "./Simulation";
@@ -53,7 +54,7 @@ const CAMERA_POS: [number, number, number] = [
 ];
 
 /** Vertical field of view of the perspective camera, in degrees. */
-const FOV = 32;
+const FOV = 34;
 
 /**
  * Distance that frames the same amount of map the orthographic view does at its
@@ -178,6 +179,26 @@ function DevHandle() {
 }
 
 /**
+ * Depth of field endpoints, keyed to `t` — how far into the *player's own*
+ * zoom range the camera currently sits: 0 at fully zoomed out (the level
+ * framed edge to edge, `Controls`' `minZoom`/`maxDistance`), 1 at fully
+ * zoomed in (one junction, `Controls`' `maxZoom`/`minDistance`). Sharing
+ * those limits, rather than picking new ones here, is what keeps this
+ * agreeing with the camera the player actually has rather than a range nobody
+ * can reach on a particular level.
+ *
+ * Zoomed out, a shallow focus band would blur out most of the map a player
+ * needs to read, so the band is wide (1000) and the blur barely there (0.1);
+ * zoomed in, a wide flat focus stops reading as depth at all, so the band
+ * narrows to a close-up (60) and the blur strengthens into the miniature
+ * look (2).
+ */
+const FOCUS_RANGE_OUT = 1000;
+const FOCUS_RANGE_IN = 60;
+const BOKEH_SCALE_OUT = 0.1;
+const BOKEH_SCALE_IN = 2;
+
+/**
  * Depth of field, focused on whatever the orbit controls are pivoting
  * around — the thing the player is actually looking at stays sharp, and
  * everything nearer or farther falls away.
@@ -187,15 +208,42 @@ function DevHandle() {
  * `perspectiveDepthToViewZ` under the street-level one), so the same effect
  * works for both without a separate ortho-only technique.
  */
-function PostFX() {
+function PostFX({ half }: { half: number }) {
   const controls = useThree(
     (s) => s.controls as unknown as { target: THREE.Vector3 } | null,
   );
+  const camera = useThree((s) => s.camera);
   const dof = useRef<DepthOfFieldEffect>(null);
 
+  const zoomMin = useMemo(() => minZoom(half), [half]);
+  const distMax = useMemo(() => maxDistance(half), [half]);
+
   useFrame(() => {
-    if (dof.current?.target && controls)
-      dof.current.target.copy(controls.target);
+    const effect = dof.current;
+    if (!effect) return;
+    if (effect.target && controls) effect.target.copy(controls.target);
+
+    // 0 = fully zoomed out, 1 = fully zoomed in. No orbit target (e.g. the
+    // cinematic flyover, which unmounts Controls) reads as zoomed out.
+    let t = 0;
+    if (camera instanceof THREE.OrthographicCamera) {
+      t = (camera.zoom - zoomMin) / (MAX_ZOOM - zoomMin);
+    } else if (controls) {
+      const distance = camera.position.distanceTo(controls.target);
+      t = (distMax - distance) / (distMax - MIN_DISTANCE);
+    }
+    t = THREE.MathUtils.clamp(t, 0, 1);
+
+    effect.cocMaterial.focusRange = THREE.MathUtils.lerp(
+      FOCUS_RANGE_OUT,
+      FOCUS_RANGE_IN,
+      t,
+    );
+    effect.bokehScale = THREE.MathUtils.lerp(
+      BOKEH_SCALE_OUT,
+      BOKEH_SCALE_IN,
+      t,
+    );
   });
 
   return (
@@ -203,8 +251,8 @@ function PostFX() {
       <DepthOfField
         ref={dof}
         target={[0, 0, 0]}
-        focusRange={200}
-        bokehScale={1.4}
+        focusRange={FOCUS_RANGE_OUT}
+        bokehScale={BOKEH_SCALE_OUT}
       />
     </EffectComposer>
   );
@@ -233,7 +281,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       shadows={{ type: THREE.PCFShadowMap }}
       camera={{ position: CAMERA_POS, zoom, near: 1, far: 10000 }}
       gl={{
-        antialias: true,
+        antialias: false,
         // Keep the palette exact — ACES tone mapping would crush these near-whites.
         toneMapping: THREE.NoToneMapping,
         /*
@@ -303,7 +351,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       <Simulation world={world} />
       <JunctionPicker level={level} world={world} />
       <CrashFocus world={world} />
-      {depthOfField && <PostFX />}
+      {depthOfField && <PostFX half={level.half} />}
     </Canvas>
   );
 }

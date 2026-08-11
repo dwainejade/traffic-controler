@@ -5,6 +5,7 @@ import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { useHud } from "../ui/hudStore";
 import type { LevelDef } from "../sim/types";
+import { MAX_ZOOM, MIN_DISTANCE, maxDistance, minZoom } from "./cameraLimits";
 
 /**
  * Orbit controls, deliberately fenced in. The player gets to look around and
@@ -26,16 +27,16 @@ export function Controls({ level }: { level: LevelDef }) {
    */
   const half = level.half;
   const panLimit = half * 0.95;
-  const minZoom = (370 / (half * Math.SQRT2)) * 0.85;
-  const maxZoom = 26;
+  const zoomMin = minZoom(half);
+  const zoomMax = MAX_ZOOM;
 
   /*
    * The perspective camera's equivalents. It has no zoom — how much map you see
    * is how far away you are — so the same two limits become a distance range:
    * close enough to stand at a junction, far enough to see the whole card.
    */
-  const minDistance = 70;
-  const maxDistance = half * 4.5;
+  const distMin = MIN_DISTANCE;
+  const distMax = maxDistance(half);
 
   const clampTarget = () => {
     const controls = ref.current;
@@ -106,7 +107,7 @@ export function Controls({ level }: { level: LevelDef }) {
       const anchored = groundUnderPointer(x, y, before) !== null;
 
       if (camera instanceof THREE.OrthographicCamera) {
-        const next = THREE.MathUtils.clamp(camera.zoom * scale, minZoom, maxZoom);
+        const next = THREE.MathUtils.clamp(camera.zoom * scale, zoomMin, zoomMax);
         if (next === camera.zoom) return;
         camera.zoom = next;
         camera.updateProjectionMatrix();
@@ -134,7 +135,7 @@ export function Controls({ level }: { level: LevelDef }) {
 
         const t = -camera.position.y / forward.y;
         pivot.copy(camera.position).addScaledVector(forward, t);
-        const distance = THREE.MathUtils.clamp(t, minDistance, maxDistance);
+        const distance = THREE.MathUtils.clamp(t, distMin, distMax);
         camera.position.copy(pivot).addScaledVector(forward, -distance);
         controls.target.copy(pivot);
       }
@@ -216,7 +217,7 @@ export function Controls({ level }: { level: LevelDef }) {
       el.removeEventListener("pointerup", onPointerUp);
       el.removeEventListener("pointercancel", onPointerUp);
     };
-  }, [camera, gl, minZoom, maxZoom, minDistance, maxDistance]);
+  }, [camera, gl, zoomMin, zoomMax, distMin, distMax]);
 
   /*
    * WASD pans, in screen terms rather than world terms: W is always "up the
@@ -392,10 +393,10 @@ export function Controls({ level }: { level: LevelDef }) {
        * the whole thing, so the camera would fight you the moment you touched
        * it. Out to the whole card, in to where individual cars read clearly.
        */
-      minZoom={minZoom}
-      maxZoom={maxZoom}
-      minDistance={minDistance}
-      maxDistance={maxDistance}
+      minZoom={zoomMin}
+      maxZoom={zoomMax}
+      minDistance={distMin}
+      maxDistance={distMax}
       // Zoom is handled above so it can track the pointer; OrbitControls only
       // ever zooms about its target.
       enableZoom={false}
