@@ -38,26 +38,39 @@ export const IDM = {
 const MAX_BRAKE = -9;
 
 /**
+ * How hard a particular vehicle accelerates and brakes.
+ *
+ * A loaded box truck does not pull away like a hatchback, and with mixed traffic
+ * that difference is the whole point of having trucks at all: one of them at the
+ * head of a queue costs the junction real capacity. Absent, the car figures
+ * above are used, so every existing call site is unchanged.
+ */
+export type DrivePower = { a: number; b: number };
+
+/**
  * @param v       this car's speed
  * @param gap     clear distance to the leader's rear bumper (may be negative)
  * @param leaderV leader's speed; 0 for a stop line
  * @param v0      desired speed, overridable for slow movements like tight turns
+ * @param power   acceleration and braking for this vehicle; defaults to a car's
  */
 export function idmAccel(
   v: number,
   gap: number,
   leaderV: number,
   v0: number = IDM.v0,
+  power: DrivePower = IDM,
 ): number {
   const free = 1 - Math.pow(v / v0, IDM.delta);
 
-  if (gap === Infinity) return IDM.a * free;
+  if (gap === Infinity) return power.a * free;
   if (gap <= 0.05) return MAX_BRAKE;
 
   const dv = v - leaderV;
   const sStar =
-    IDM.s0 + Math.max(0, v * IDM.T + (v * dv) / (2 * Math.sqrt(IDM.a * IDM.b)));
+    IDM.s0 +
+    Math.max(0, v * IDM.T + (v * dv) / (2 * Math.sqrt(power.a * power.b)));
 
-  const accel = IDM.a * (free - (sStar / gap) * (sStar / gap));
+  const accel = power.a * (free - (sStar / gap) * (sStar / gap));
   return Math.max(accel, MAX_BRAKE);
 }

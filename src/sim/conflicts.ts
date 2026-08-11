@@ -278,6 +278,32 @@ export function buildPriority(net: Network, conflicts: ConflictMap): Priority {
 
       if (opposing && leftA && leftB) continue; // they pass; nothing to resolve
 
+      /*
+       * A turn out of the general lanes crossing the bus lane beside it.
+       *
+       * The two movements leave the *same* arm, which no other conflicting pair
+       * does: normally lane discipline keeps an approach's movements parallel
+       * all the way through the box. A kerbside bus lane breaks that, because
+       * anything turning toward that kerb has to cross it.
+       *
+       * This is emphatically not a reason to give the bus lane its own phase.
+       * On a real street the turning driver looks over their shoulder, waits for
+       * the bus, and goes — and signalising it instead would cost the junction a
+       * whole clearance interval a cycle to separate two movements that already
+       * separate themselves. So: the turn gives way, the bus does not.
+       */
+      if (outA !== undefined && outA === outB) {
+        const busStraight = (l: typeof a) => l.turn === "straight" && l.access === "bus";
+        if (busStraight(a) && b.turn !== "straight") {
+          add(b.id, { connector: a.id, sAt: point.sA, sSelf: point.sB, feeder: a.from });
+          continue;
+        }
+        if (busStraight(b) && a.turn !== "straight") {
+          add(a.id, { connector: b.id, sAt: point.sB, sSelf: point.sA, feeder: b.from });
+          continue;
+        }
+      }
+
       if (opposing && leftA !== leftB) {
         // The left turn waits; the movement coming the other way does not.
         if (leftA) {

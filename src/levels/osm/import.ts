@@ -3,6 +3,7 @@ import type {
   LevelDef,
   MapNode,
   NodeId,
+  RoadClass,
   RoadDef,
 } from "../../sim/types";
 import {
@@ -183,6 +184,30 @@ function laneCount(tags: Tags, oneWay: boolean): { fwd: number; bwd: number } {
     ? { fwd: wide ? 2 : 1, bwd: 0 }
     : { fwd: wide ? 2 : 1, bwd: wide ? 2 : 1 };
 }
+
+/**
+ * The way's place in the road hierarchy, as a `RoadClass`.
+ *
+ * Slip roads inherit their parent: a `secondary_link` is a stub of a secondary
+ * and carries the same traffic, so a truck allowed on the avenue must be allowed
+ * on the ramp that joins it — otherwise the route table has a hole exactly where
+ * the arterial network connects to itself.
+ */
+function roadClass(tags: Tags): RoadClass | null {
+  const cls = (tags.highway ?? "").replace(/_link$/, "");
+  return ROAD_CLASSES.has(cls as RoadClass) ? (cls as RoadClass) : null;
+}
+
+const ROAD_CLASSES: ReadonlySet<RoadClass> = new Set<RoadClass>([
+  "motorway",
+  "trunk",
+  "primary",
+  "secondary",
+  "tertiary",
+  "unclassified",
+  "residential",
+  "living_street",
+]);
 
 function isOneWay(tags: Tags): boolean {
   return tags.oneway === "yes" || tags.oneway === "1" || tags.oneway === "-1";
@@ -549,6 +574,31 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     chains = buildChains(edges);
   }
 
+  /*
+   * Chains that begin and end at the same junction.
+   *
+   * Merging collapses two nearby junctions into one, and where a short link ran
+   * between them — a slip road round a plaza, the tip of a one-way couplet, the
+   * kerbed island at Boerum Place — both of its ends become the *same* node and
+   * the link becomes a loop.
+   *
+   * The edge filter above cannot catch these: its self-loop test runs on
+   * individual edges, and the loop only closes later, once `buildChains`
+   * collapses the degree-2 nodes in between. So the pair test in the merge pass
+   * skips them (a === b) and they survive all the way to the level.
+   *
+   * There is nothing to keep. The lane model has no way to express a movement
+   * from a junction back into itself — `classifyTurn` reads it as a U-turn and
+   * declines it — and the loop is by construction shorter than the box at both
+   * of its ends, so trimming it back to the carriageway leaves no road at all
+   * and `trimPoly` throws. Downtown Brooklyn produces six of them; the Rogers
+   * extract, being an ordinary grid, produced none, which is why this went
+   * unnoticed until now.
+   */
+  chains = chains.filter(
+    (c) => rep(c.ids[0]) !== rep(c.ids[c.ids.length - 1]),
+  );
+
   // --- 6. Assemble the level.
   const nodes: MapNode[] = [];
   const roads: RoadDef[] = [];
@@ -696,6 +746,7 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
       to: nameOf(ids[ids.length - 1]),
       lanesPerDir: lanesPerDirection(tags, oneWayTag),
       ...(tags.name ? { name: tags.name } : {}),
+      ...(roadClass(tags) ? { class: roadClass(tags)! } : {}),
       ...(oneWayTag ? { oneWay: true } : {}),
       ...(busForward || busBackward
         ? { busLanes: { forward: busForward, backward: busBackward } }

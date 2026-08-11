@@ -10,6 +10,8 @@ import { Footprints } from "./Footprints";
 import { Trees } from "./Trees";
 import { scatterLevel } from "./scatter";
 import { Controls } from "./Controls";
+import { BusStops } from "./BusStops";
+import { ParkedCars } from "./ParkedCars";
 import { Simulation } from "./Simulation";
 import { CrashFocus } from "./CrashFocus";
 import { JunctionPicker } from "./JunctionPicker";
@@ -56,7 +58,9 @@ const FOV = 32;
 function perspectiveDistance(half: number): number {
   // 0.8 because the perspective view is not trying to show the whole card at
   // once — it is worth being closer in, and the pan limits reach the rest.
-  return (half * Math.SQRT2 * 0.8) / Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+  return (
+    (half * Math.SQRT2 * 0.8) / Math.tan(THREE.MathUtils.degToRad(FOV / 2))
+  );
 }
 
 /**
@@ -78,7 +82,10 @@ function Reframe({
   half: number;
 }) {
   const camera = useThree((s) => s.camera);
-  const controls = useThree((s) => s.controls) as { target: THREE.Vector3; update: () => void } | null;
+  const controls = useThree((s) => s.controls) as {
+    target: THREE.Vector3;
+    update: () => void;
+  } | null;
 
   useEffect(() => {
     if (camera instanceof THREE.OrthographicCamera) {
@@ -139,7 +146,10 @@ function DevHandle() {
           controls.target.set(x, 0, z);
           camera.position.x += dx;
           camera.position.z += dz;
-          if (zoom !== undefined && camera instanceof THREE.OrthographicCamera) {
+          if (
+            zoom !== undefined &&
+            camera instanceof THREE.OrthographicCamera
+          ) {
             camera.zoom = zoom;
             camera.updateProjectionMatrix();
           }
@@ -167,6 +177,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
   const { buildings, trees } = useMemo(() => scatterLevel(level), [level]);
   const showLabels = useHud((s) => s.layers.labels);
   const showSignals = useHud((s) => s.layers.signals);
+  const showParking = useHud((s) => s.layers.parking);
   const perspective = useHud((s) => s.layers.perspective);
 
   /*
@@ -179,7 +190,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
   return (
     <Canvas
       orthographic
-      shadows={{ type: THREE.PCFSoftShadowMap }}
+      shadows={{ type: THREE.PCFShadowMap }}
       camera={{ position: CAMERA_POS, zoom, near: 1, far: 10000 }}
       gl={{
         antialias: true,
@@ -207,8 +218,24 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
         <PerspectiveCamera
           makeDefault
           fov={FOV}
-          near={1}
-          far={20000}
+          /*
+           * A tight near plane, because depth precision is what keeps the road
+           * markings from tearing.
+           *
+           * Perspective depth is distributed as 1/z, so the near plane sets
+           * almost the whole budget: at near=1 and far=20000 the first metre in
+           * front of the lens consumed as much of the depth buffer as the entire
+           * rest of the map, and the ground layers — kerb, asphalt, paint, all
+           * within a few centimetres of each other and several hundred metres
+           * away — landed on the same depth value and z-fought.
+           *
+           * The camera orbits hundreds of metres out and the controls never let
+           * it closer than the map's own framing distance, so nothing is ever
+           * within 20m of it to clip. Trading a near plane that could never see
+           * anything for a usable depth buffer is free.
+           */
+          near={20}
+          far={6000}
           position={CAMERA_POS}
         />
       )}
@@ -229,6 +256,8 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       <Trees items={trees} />
       <QueuePressure world={world} />
       {showSignals && <SignalHeads level={level} world={world} />}
+      <BusStops world={world} />
+      {showParking && <ParkedCars world={world} />}
       <Simulation world={world} />
       <JunctionPicker level={level} world={world} />
       <CrashFocus world={world} />

@@ -207,6 +207,7 @@ export function validateLevel(level: LevelDef): Validation {
   world.warmup(WARMUP);
   const sp0 = world.stats.spawned;
   const ret0 = world.stats.retired;
+  const park0 = world.stats.parked;
   const act0 = world.stats.active;
 
   const steps = RUN_SECONDS * 60;
@@ -215,10 +216,23 @@ export function validateLevel(level: LevelDef): Validation {
   if (world.state === "lost") {
     errors.push(`run: level ${world.failReason === "crash" ? "crashed" : "failed"} within ${RUN_SECONDS}s of warmup`);
   }
+  /*
+   * Every car created has to be somewhere: delivered off a map edge, towed after
+   * a crash, sitting in a kerbside bay, or still driving. `spawned` counts cars
+   * that pulled out of a bay as well as cars that arrived at an edge, so
+   * unparking needs no term of its own — but parking does, because it is a way
+   * off the map that did not exist before.
+   */
   const spawned = world.stats.spawned - sp0;
-  const balance = world.stats.delivered + (world.stats.retired - ret0) + (world.stats.active - act0);
+  const balance =
+    world.stats.delivered +
+    (world.stats.retired - ret0) +
+    (world.stats.parked - park0) +
+    (world.stats.active - act0);
   if (spawned !== balance) {
-    errors.push(`run: ledger off — spawned ${spawned} but delivered+retired+Δactive = ${balance}`);
+    errors.push(
+      `run: ledger off — spawned ${spawned} but delivered+retired+parked+Δactive = ${balance}`,
+    );
   }
   if (spawned === 0 && world.demand > 0) {
     errors.push(`run: nothing spawned in ${RUN_SECONDS}s at demand ${world.demand}`);

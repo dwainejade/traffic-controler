@@ -84,6 +84,20 @@ export const VEHICLE_COLORS: readonly { hex: string; weight: number }[] = [
   { hex: '#B5563A', weight: 3 }, // bronze
 ]
 
+/**
+ * MTA bus blue.
+ *
+ * The third and last saturated thing allowed into the environment, and it earns
+ * it the same way the bus lane does: a bus is the one vehicle whose identity has
+ * to be readable from across the map, because it is the one vehicle whose
+ * behaviour — stopping at the kerb, holding a lane no one else may use — makes
+ * no sense unless you know what it is.
+ */
+export const MTA_BLUE = '#0039A6'
+
+/** Window band on a bus, so it does not read as a plain blue slab. */
+export const BUS_GLASS = '#B7C4D6'
+
 /** Amber of a turn indicator. Emissive, so it reads against any body colour. */
 export const INDICATOR = '#FFA318'
 

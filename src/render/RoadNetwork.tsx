@@ -6,6 +6,7 @@ import {
   polyLength,
   roadCentreline,
   samplePoly,
+  trimPoly,
   type Pt,
 } from '../sim/centreline'
 import { laneLateralOffset } from '../sim/network'
@@ -22,11 +23,8 @@ import {
   type LevelDef,
 } from '../sim/types'
 import { flatRoundedRect } from './geometry'
+import { LAYER } from './layers'
 
-/** Draw order on the ground plane. Small gaps avoid z-fighting on a flat surface. */
-const Y_CURB = 0.012
-const Y_ROAD = 0.03
-const Y_MARK = 0.05
 
 type Rect = { x: number; z: number; angle: number; w: number; l: number }
 
@@ -157,6 +155,19 @@ function buildRibbons(items: { poly: Pt[]; left: number; right: number }[]): THR
 
 const CURB_LIP = 0.7
 
+/** Width of the painted line marking off the kerbside parking strip. */
+const PARKING_LINE = 0.14
+
+/** Width of a lane divider, and the dash pattern of a broken one. */
+const LANE_LINE = 0.16
+const DASH = 3
+const DASH_GAP = 6
+
+/** Half a junction box at this node, or zero where the road runs off the map. */
+function halfOfNode(level: LevelDef, id: string): number {
+  return nodeById(level, id).kind === 'junction' ? junctionSize(level, id) / 2 : 0
+}
+
 export function RoadNetwork({ level }: { level: LevelDef }) {
   const { asphaltGeom, curbGeom, busGeom, parkingGeom, markings, junctions } = useMemo(() => {
     type Ribbon = { poly: Pt[]; left: number; right: number }
@@ -164,6 +175,7 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
     const curbItems: Ribbon[] = []
     const busItems: Ribbon[] = []
     const parkingItems: Ribbon[] = []
+    const dividerItems: Ribbon[] = []
     const markings: Rect[] = []
     const junctions: { x: number; z: number; size: number }[] = []
 
@@ -203,11 +215,88 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
       const busFwd = (road.busLanes?.forward ?? 0) * LANE_WIDTH
       const busBwd = road.oneWay ? 0 : (road.busLanes?.backward ?? 0) * LANE_WIDTH
 
+      /*
+       * Trimmed to the junction boxes, unlike the asphalt beneath it. The road
+       * surface deliberately runs under the box and is covered by it; a marking
+       * sits *above* the box, so an untrimmed one paints a lane line straight
+       * across the middle of the intersection.
+       */
+      const painted = trimPoly(
+        centre,
+        halfOfNode(level, road.from),
+        halfOfNode(level, road.to),
+      )
+      const paintedLen = polyLength(painted)
+
+      /** Like `mark`, but measured along the trimmed line the dividers use. */
+      const markPainted = (s: number, lateral: number, mw: number, ml: number) => {
+        const p = samplePoly(painted, s)
+        markings.push({
+          x: p.x - p.tz * lateral,
+          z: p.z + p.tx * lateral,
+          angle: Math.atan2(p.tx, p.tz),
+          w: mw,
+          l: ml,
+        })
+      }
+
+      /*
+       * Lane dividers.
+       *
+       * Without these a two-lane carriageway is a single undifferentiated slab
+       * of grey, and the street reads as one very wide lane rather than as the
+       * two it is. The centreline below separates the *directions*; this
+       * separates the lanes within a direction, which is the line a driver
+       * actually keeps station against.
+       *
+       * Dashed between general lanes, because crossing one is allowed. Solid
+       * against a bus lane, because it is not — the paint is the rule.
+       */
+      const divider = (lateral: number, solid: boolean) => {
+        if (solid) {
+          dividerItems.push({
+            poly: painted,
+            left: lateral - LANE_LINE / 2,
+            right: lateral + LANE_LINE / 2,
+          })
+          return
+        }
+        for (let s = DASH_GAP; s < paintedLen - DASH_GAP; s += DASH + DASH_GAP) {
+          const seg = Math.min(DASH, paintedLen - DASH_GAP - s)
+          if (seg < 0.6) break
+          markPainted(s + seg / 2, lateral, LANE_LINE, seg)
+        }
+      }
+
+      /*
+       * The parking strip is marked, not surfaced.
+       *
+       * It used to be filled in a slightly different grey, which read as a
+       * separate piece of road running the whole length of every street — a wide
+       * pale band that competed with the carriageway and made the streets look
+       * twice as wide as they are. It is the same asphalt as the rest of the
+       * road, and in life what tells you where it starts is a painted line. Now
+       * that there are actually cars parked on it, the fill was doing no work at
+       * all and the line does the job on its own.
+       *
+       * The bus lane keeps its colour: that is real surface treatment, and the
+       * whole point of it is to be unmistakable at a glance.
+       */
       if (parkRight > 0) {
-        parkingItems.push({ poly: centre, left: edges.right - parkRight, right: edges.right })
+        const inner = edges.right - parkRight
+        parkingItems.push({
+          poly: painted,
+          left: inner - PARKING_LINE / 2,
+          right: inner + PARKING_LINE / 2,
+        })
       }
       if (parkLeft > 0) {
-        parkingItems.push({ poly: centre, left: edges.left, right: edges.left + parkLeft })
+        const inner = edges.left + parkLeft
+        parkingItems.push({
+          poly: painted,
+          left: inner - PARKING_LINE / 2,
+          right: inner + PARKING_LINE / 2,
+        })
       }
       if (busFwd > 0) {
         const outer = edges.right - parkRight
@@ -216,6 +305,30 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
       if (busBwd > 0) {
         const outer = edges.left + parkLeft
         busItems.push({ poly: centre, left: outer, right: outer + busBwd })
+      }
+
+      /*
+       * One boundary per pair of adjacent lanes, in each direction that exists.
+       * A one-way's lanes straddle the centreline and a two-way's sit wholly on
+       * their own side, but `laneLateralOffset` already knows which — so the
+       * boundary is always half a lane inboard of lane k's centre, and the
+       * backward carriageway is the mirror of the forward one.
+       */
+      const busFwdLanes = road.oneWay
+        ? (road.busLanes?.forward ?? 0)
+        : (road.busLanes?.forward ?? 0)
+      const busBwdLanes = road.oneWay ? 0 : (road.busLanes?.backward ?? 0)
+
+      for (const [sign, buses] of [
+        [1, busFwdLanes],
+        ...(road.oneWay ? [] : [[-1, busBwdLanes] as const]),
+      ] as const) {
+        const total = road.lanesPerDir + (buses > 0 ? 1 : 0)
+        for (let k = 1; k < total; k++) {
+          const boundary = laneLateralOffset(road, k) - LANE_WIDTH / 2
+          // The last boundary is the one against the bus lane, if there is one.
+          divider(sign * boundary, buses > 0 && k === total - 1)
+        }
       }
 
       // A marking at arc distance s from the road's start, offset laterally to
@@ -334,7 +447,7 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
       asphaltGeom: buildRibbons(asphaltItems),
       curbGeom: buildRibbons(curbItems),
       busGeom: buildRibbons(busItems),
-      parkingGeom: buildRibbons(parkingItems),
+      parkingGeom: buildRibbons([...parkingItems, ...dividerItems]),
       markings,
       junctions,
     }
@@ -361,14 +474,14 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
   return (
     <group>
       {/* Casing sits just under the asphalt and reads as a curb lip. */}
-      <mesh geometry={curbGeom} position={[0, Y_CURB, 0]}>
+      <mesh geometry={curbGeom} position={[0, LAYER.curb, 0]}>
         <meshLambertMaterial color={PALETTE.curb} />
       </mesh>
-      <mesh geometry={junctionCurbGeom} position={[0, Y_CURB + 0.001, 0]}>
+      <mesh geometry={junctionCurbGeom} position={[0, LAYER.junctionCurb, 0]}>
         <meshLambertMaterial color={PALETTE.curb} />
       </mesh>
 
-      <mesh geometry={asphaltGeom} position={[0, Y_ROAD, 0]} receiveShadow>
+      <mesh geometry={asphaltGeom} position={[0, LAYER.road, 0]} receiveShadow>
         <meshLambertMaterial color={PALETTE.road} />
       </mesh>
       {/*
@@ -378,18 +491,19 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
         bus lane and the parking bay at the crossing, and the markings drawn
         after keep a stop bar legible where it lies across paint.
       */}
-      <mesh geometry={parkingGeom} position={[0, Y_ROAD + 0.001, 0]} receiveShadow>
-        <meshLambertMaterial color={PALETTE.parking} />
+      {/* Painted, so it sits on the marking layer with the lane lines. */}
+      <mesh geometry={parkingGeom} position={[0, LAYER.parkingLine, 0]}>
+        <meshBasicMaterial color={PALETTE.marking} toneMapped={false} />
       </mesh>
-      <mesh geometry={busGeom} position={[0, Y_ROAD + 0.002, 0]} receiveShadow>
+      <mesh geometry={busGeom} position={[0, LAYER.busLane, 0]} receiveShadow>
         <meshLambertMaterial color={PALETTE.busLane} />
       </mesh>
 
-      <mesh geometry={junctionGeom} position={[0, Y_ROAD + 0.003, 0]} receiveShadow>
+      <mesh geometry={junctionGeom} position={[0, LAYER.junction, 0]} receiveShadow>
         <meshLambertMaterial color={PALETTE.road} />
       </mesh>
 
-      <InstancedRects rects={markings} color={PALETTE.marking} y={Y_MARK} />
+      <InstancedRects rects={markings} color={PALETTE.marking} y={LAYER.marking} />
     </group>
   )
 }

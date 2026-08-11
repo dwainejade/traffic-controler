@@ -59,6 +59,16 @@ export type Lane = {
   roadId: string | null;
   /** Lane index outward from the centreline; 0 hugs the centre. */
   index: number;
+  /**
+   * Who may drive here.
+   *
+   * A bus lane was, until now, paint: real width that widened the street and
+   * carried nothing. It is a lane, and the reason it is worth simulating is that
+   * it is a lane *general traffic cannot use* — the capacity it removes from the
+   * cars is exactly as real as the capacity it gives the buses, and a bus lane
+   * that anyone could drive in would be neither.
+   */
+  access: "all" | "bus";
   fromNode: NodeId | null;
   toNode: NodeId | null;
   /** Car ids currently on this lane, ordered front-most (largest s) first. */
@@ -195,7 +205,24 @@ export function buildNetwork(level: LevelDef): Network {
         ] as const);
 
     for (const [start, end, poly] of directions) {
-      for (let k = 0; k < road.lanesPerDir; k++) {
+      /*
+       * A bus lane, where this direction has one, is emitted as one more lane at
+       * index `lanesPerDir` — immediately outboard of the general lanes and
+       * inboard of the parking, which is precisely where `roadEdges` paints it.
+       *
+       * No new offset arithmetic is needed for this, and that is not luck:
+       * `laneLateralOffset(road, lanesPerDir)` already lands on the middle of
+       * the painted strip, for a one-way and a two-way alike, because both
+       * stack their extras outward from the same edge in the same order.
+       */
+      const forward = start.id === road.from;
+      const busLanes = road.busLanes ?? {};
+      const busHere = road.oneWay
+        ? (busLanes.forward ?? 0)
+        : ((forward ? busLanes.forward : busLanes.backward) ?? 0);
+      const count = road.lanesPerDir + (busHere > 0 ? 1 : 0);
+
+      for (let k = 0; k < count; k++) {
         const geom = polyline(offsetPoly(poly, laneLateralOffset(road, k)));
 
         const feedsJunction = end.kind === "junction";
@@ -209,6 +236,7 @@ export function buildNetwork(level: LevelDef): Network {
           turn: null,
           roadId: road.id,
           index: k,
+          access: k >= road.lanesPerDir ? "bus" : "all",
           fromNode: start.id,
           toNode: end.id,
         });
@@ -275,7 +303,25 @@ export function buildNetwork(level: LevelDef): Network {
          * its phase blocks every straight-ahead car queued behind it, which
          * collapses junction capacity.
          */
-        const lastIdx = fromArm.inbound.length - 1;
+        /*
+         * Bus lanes are paired first and separately: a bus lane joins the
+         * receiving arm's bus lane and nothing else.
+         *
+         * Letting it fall through to the general rules would send a bus from
+         * the outermost lane into whatever lane the receiving road happened to
+         * have, cutting diagonally across every general lane beside it. That is
+         * a weave, the conflict builder correctly reports it as one, and the
+         * junction pays an extra phase and its clearance interval for a
+         * movement that in life is simply the bus lane continuing. Where the
+         * corridor genuinely ends, emitting no connector is the honest answer —
+         * the bus route does not turn there.
+         */
+        const busIn = fromArm.inbound.filter((id) => lanes[id].access === "bus");
+        const busOut = toArm.outbound.filter((id) => lanes[id].access === "bus");
+        const generalIn = fromArm.inbound.filter((id) => lanes[id].access === "all");
+        const generalOut = toArm.outbound.filter((id) => lanes[id].access === "all");
+
+        const lastIdx = generalIn.length - 1;
 
         /*
          * Every movement holds its lane index: lane k in, lane k out.
@@ -293,20 +339,30 @@ export function buildNetwork(level: LevelDef): Network {
          * the question does not arise. Two-lane approaches need the real fix:
          * lane changing on the links.
          */
-        const pairs: [number, number][] =
+        const pairs: [LaneId, LaneId][] = [];
+
+        // Straight on down the bus corridor. A bus lane never turns.
+        if (turn === "straight" && busIn.length > 0 && busOut.length > 0) {
+          pairs.push([busIn[0], busOut[0]]);
+        }
+
+        const general: [number, number][] =
           turn === "left"
             ? [[0, 0]]
             : turn === "right"
-              ? [[lastIdx, toArm.outbound.length - 1]]
-              : fromArm.inbound.map(
-                  (_, k) =>
-                    [k, Math.min(k, toArm.outbound.length - 1)] as [number, number],
+              ? [[lastIdx, generalOut.length - 1]]
+              : generalIn.map(
+                  (_, k) => [k, Math.min(k, generalOut.length - 1)] as [number, number],
                 );
 
-        for (const [fromK, toK] of pairs) {
-          const srcId = fromArm.inbound[fromK];
-          const dstId = toArm.outbound[toK];
-          if (srcId === undefined || dstId === undefined) continue;
+        for (const [fromK, toK] of general) {
+          const src = generalIn[fromK];
+          const dst = generalOut[toK];
+          if (src !== undefined && dst !== undefined) pairs.push([src, dst]);
+        }
+
+        for (const [srcId, dstId] of pairs) {
+          const fromK = lanes[srcId].index;
           const src = lanes[srcId];
           const dst = lanes[dstId];
 
@@ -356,6 +412,9 @@ export function buildNetwork(level: LevelDef): Network {
             turn,
             roadId: null,
             index: fromK,
+            // A connector inherits its feeding lane's restriction: the movement
+            // out of a bus lane is as closed to general traffic as the lane is.
+            access: src.access,
             fromNode: null,
             toNode: null,
           });

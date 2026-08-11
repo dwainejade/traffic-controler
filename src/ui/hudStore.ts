@@ -35,6 +35,8 @@ export type LayerState = {
   signals: boolean;
   /** Move the sun with the clock. Off pins the map at noon. */
   daynight: boolean;
+  /** Cars at the kerb. */
+  parking: boolean;
   /** Swap the fixed orthographic camera for a perspective one. */
   perspective: boolean;
 };
@@ -53,6 +55,11 @@ export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
     name: "daynight",
     label: "Day & night",
     hint: "Light, shadow and haze follow the clock. Off holds the map at midday",
+  },
+  {
+    name: "parking",
+    label: "Parked cars",
+    hint: "Fill the kerbside bays. Off leaves the parking strips empty",
   },
   {
     name: "perspective",
@@ -121,7 +128,13 @@ export const useHud = create<HudState>(() => ({
   networkDelay: 0,
   focus: null,
   demand: 1,
-  layers: { labels: true, signals: true, daynight: true, perspective: true },
+  layers: {
+    labels: true,
+    signals: true,
+    daynight: true,
+    parking: true,
+    perspective: true,
+  },
   timeOfDay: hourOfDay(0),
   state: "running",
   failReason: null,

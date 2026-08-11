@@ -1,4 +1,4 @@
-import type { LaneId, Network } from "./network";
+import type { Lane, LaneId, Network } from "./network";
 import type { NodeId } from "./types";
 
 /**
@@ -23,7 +23,26 @@ function successors(net: Network, laneId: LaneId): LaneId[] {
   return lane.next.map((c) => net.lanes[c].next[0]).filter((id) => id !== undefined);
 }
 
-export function buildRouting(net: Network): RoutingTables {
+/**
+ * @param allow Which lanes this class of vehicle may use. Absent, all of them.
+ *
+ * The filter is how a truck is kept off the residential grid: it is not a
+ * penalty a driver might decide to pay, it is an edge that does not exist, so a
+ * truck route through a side street cannot be built at all. That is also how the
+ * real rule works — a through-truck route is a legal restriction, not a
+ * preference.
+ *
+ * `destinations` is deliberately *not* filtered. Every class shares one list, in
+ * one order, so the world's per-destination attraction weights stay aligned
+ * across all of them; a destination a truck cannot reach simply has infinite
+ * cost everywhere, and the spawn loop discards that draw and tries again.
+ */
+export function buildRouting(
+  net: Network,
+  allow?: (lane: Lane) => boolean,
+): RoutingTables {
+  const passable = (id: LaneId) => allow === undefined || allow(net.lanes[id]);
+
   const destinations: NodeId[] = [];
   for (const id of net.exitLanes) {
     const node = net.lanes[id].toNode;
@@ -33,8 +52,9 @@ export function buildRouting(net: Network): RoutingTables {
   // Reverse adjacency, so a single BFS from each destination costs one pass.
   const incoming = new Map<LaneId, LaneId[]>();
   for (const lane of net.lanes) {
-    if (lane.kind !== "road") continue;
+    if (lane.kind !== "road" || !passable(lane.id)) continue;
     for (const succ of successors(net, lane.id)) {
+      if (!passable(succ)) continue;
       const list = incoming.get(succ) ?? [];
       list.push(lane.id);
       incoming.set(succ, list);
@@ -48,7 +68,7 @@ export function buildRouting(net: Network): RoutingTables {
     const queue: LaneId[] = [];
 
     for (const id of net.exitLanes) {
-      if (net.lanes[id].toNode !== dest) continue;
+      if (net.lanes[id].toNode !== dest || !passable(id)) continue;
       dist[id] = 0;
       queue.push(id);
     }

@@ -5,9 +5,11 @@ import { PALETTE } from "../art/palette";
 import { IDM } from "../sim/idm";
 import { CAR_LENGTH, type World } from "../sim/world";
 import { LANE_WIDTH } from "../sim/types";
+import { LAYER } from "./layers";
+
 
 /** Sits above the asphalt but below the painted markings. */
-const Y = 0.042;
+const Y = LAYER.pressure;
 
 /** Space one queued car occupies at a standstill. */
 const SLOT = CAR_LENGTH + IDM.s0;
@@ -103,7 +105,19 @@ export function QueuePressure({ world }: { world: World }) {
       args={[UNIT_PLANE, undefined, segments.length]}
       key={segments.length}
     >
-      <meshBasicMaterial toneMapped={false} />
+      {/*
+        Lit, like the asphalt it lies on.
+
+        This overlay's resting state is not transparent — it is `PALETTE.road`,
+        the colour of the road, so that an uncongested lane shows nothing. That
+        only holds while the road actually *is* that colour. An unlit material
+        ignores the sky, so once the day/night cycle went in, the road beneath
+        darkened at dusk and this stayed at its fixed daytime grey: every lane
+        lit up as a pale band after dark, with the junction boxes — which have no
+        road lanes under them — staying correctly dark. Sharing the road's
+        lighting makes "the same colour as the road" true again at every hour.
+      */}
+      <meshLambertMaterial />
     </instancedMesh>
   );
 }

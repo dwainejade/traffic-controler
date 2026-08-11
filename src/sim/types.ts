@@ -25,6 +25,40 @@ export const STOP_OFFSET = CROSSWALK_GAP + CROSSWALK_DEPTH + STOP_BAR_GAP
 
 export type NodeId = string
 
+/**
+ * The OSM road hierarchy, carried through from the import so the simulation can
+ * ask what kind of street a road is.
+ *
+ * Until now the `highway` tag was consumed inside the importer and thrown away —
+ * it survived only folded into source spawn weights. Trucks need it back: a New
+ * York truck route is defined by exactly this classification, and "stay on the
+ * big streets" is not derivable from lane count or width.
+ */
+export type RoadClass =
+  | 'motorway'
+  | 'trunk'
+  | 'primary'
+  | 'secondary'
+  | 'tertiary'
+  | 'unclassified'
+  | 'residential'
+  | 'living_street'
+
+/**
+ * Classes a through truck may use.
+ *
+ * This is the NYC through-truck-route rule in miniature: freight belongs on the
+ * arterials and off the residential grid. On the Rogers map it resolves to
+ * Rogers Avenue, Nostrand Avenue and Bedford Avenue, and nothing else.
+ */
+export const TRUCK_ROUTE: ReadonlySet<RoadClass> = new Set<RoadClass>([
+  'motorway',
+  'trunk',
+  'primary',
+  'secondary',
+  'tertiary',
+])
+
 export type MapNode = {
   id: NodeId
   /** World position on the ground plane, [x, z]. */
@@ -63,6 +97,12 @@ export type RoadDef = {
   lanesPerDir: number
   /** Street name, for map labels. Presentational; the simulation never reads it. */
   name?: string
+  /**
+   * Where this street sits in the road hierarchy. Unlike `name`, the simulation
+   * *does* read this: it is what confines trucks to the arterials. Absent on
+   * hand-authored levels, which are treated as unrestricted.
+   */
+  class?: RoadClass
   /**
    * Kerbside parking strips: 0, 1 (the right-hand kerb) or 2. Widens the paved
    * surface and moves the kerb out, and nothing else — no car drives here.

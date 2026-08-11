@@ -3,7 +3,9 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { INDICATOR, SIGNAL, VEHICLE_COLORS } from "../art/palette";
 import { SKY } from "../art/daylight";
-import { CAR_LENGTH, CAR_WIDTH, type World } from "../sim/world";
+import { VEHICLE, type World } from "../sim/world";
+import { UNIT_PLANE, blobTexture, bodyGeometry, glowTexture } from "./vehicleArt";
+import { LAYER } from "./layers";
 import { sampleLane } from "../sim/network";
 import { LANE_WIDTH } from "../sim/types";
 import { publishHud, useHud } from "../ui/hudStore";
@@ -28,78 +30,6 @@ const MAX_STEPS_PER_FRAME = 1200;
 const MAX_CARS = 2400;
 
 const HUD_INTERVAL = 1 / 6;
-
-/** Body box with a lighter roof, so cars read as objects rather than flat chips. */
-function carGeometry(): THREE.BufferGeometry {
-  const g = new THREE.BoxGeometry(CAR_WIDTH, 1.4, CAR_LENGTH).toNonIndexed();
-  g.translate(0, 0.85, 0);
-
-  const pos = g.attributes.position as THREE.BufferAttribute;
-  const colors = new Float32Array(pos.count * 3);
-  for (let i = 0; i < pos.count; i++) {
-    const shade = pos.getY(i) > 1.5 ? 1.16 : 0.88;
-    colors[i * 3] = shade;
-    colors[i * 3 + 1] = shade;
-    colors[i * 3 + 2] = shade;
-  }
-  g.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  return g;
-}
-
-/** Soft blob used as a fake contact shadow — far cheaper than shadow-mapping 200 cars. */
-function blobTexture(): THREE.Texture {
-  const size = 64;
-  const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = size;
-  const ctx = canvas.getContext("2d")!;
-  const grad = ctx.createRadialGradient(
-    size / 2,
-    size / 2,
-    0,
-    size / 2,
-    size / 2,
-    size / 2,
-  );
-  grad.addColorStop(0, "rgba(40,44,50,0.34)");
-  grad.addColorStop(0.55, "rgba(40,44,50,0.18)");
-  grad.addColorStop(1, "rgba(40,44,50,0)");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, size, size);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
-
-/**
- * The same falloff as the shadow blob but white, for the pool of light a car
- * throws on the road. It cannot share `blobTexture`: that one's RGB is the dark
- * grey of a shadow, and added to a night road it contributes essentially
- * nothing — a headlight has to bring its own light with it.
- */
-function glowTexture(): THREE.Texture {
-  const size = 64;
-  const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = size;
-  const ctx = canvas.getContext("2d")!;
-  const grad = ctx.createRadialGradient(
-    size / 2,
-    size / 2,
-    0,
-    size / 2,
-    size / 2,
-    size / 2,
-  );
-  grad.addColorStop(0, "rgba(255,255,255,0.6)");
-  grad.addColorStop(0.45, "rgba(255,255,255,0.2)");
-  grad.addColorStop(1, "rgba(255,255,255,0)");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, size, size);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
-}
-
-const UNIT_PLANE = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
 
 /** Indicators flash at roughly 1.5 Hz, as real ones do. */
 const BLINK_HZ = 1.5;
@@ -148,7 +78,7 @@ export function Simulation({ world }: { world: World }) {
   const hudTimer = useRef(0);
   const speed = useHud((s) => s.speed);
 
-  const geom = useMemo(() => carGeometry(), []);
+  const geom = useMemo(() => bodyGeometry(), []);
   const blob = useMemo(() => blobTexture(), []);
   const glow = useMemo(() => glowTexture(), []);
 
@@ -171,7 +101,7 @@ export function Simulation({ world }: { world: World }) {
       sampleLane(lane, lane.stopS, p);
       q.setFromAxisAngle(up, p.angle);
       m.compose(
-        new THREE.Vector3(p.x, 0.07, p.z),
+        new THREE.Vector3(p.x, LAYER.stopBar, p.z),
         q,
         new THREE.Vector3(LANE_WIDTH * 0.86, 1, 0.85),
       );
@@ -209,11 +139,9 @@ export function Simulation({ world }: { world: World }) {
       const up = new THREE.Vector3(0, 1, 0);
       const pos = new THREE.Vector3();
       const one = new THREE.Vector3(1, 1, 1);
-      const shadowScale = new THREE.Vector3(
-        CAR_WIDTH * 2.1,
-        1,
-        CAR_LENGTH * 1.5,
-      );
+      // Reused per car — the unit body is scaled to whatever kind it is.
+      const bodyScale = new THREE.Vector3();
+      const shadowScale = new THREE.Vector3();
       const colour = new THREE.Color();
       const p = { x: 0, z: 0, angle: 0 };
 
@@ -227,11 +155,7 @@ export function Simulation({ world }: { world: World }) {
       const head = heads.current;
       const tail = tails.current;
       const beam = beams.current;
-      const beamScale = new THREE.Vector3(
-        CAR_WIDTH * 2.4,
-        1,
-        CAR_LENGTH * 2.4,
-      );
+      const beamScale = new THREE.Vector3();
       let lit = 0;
 
       // One shared flash phase would look mechanical; offsetting per car keeps
@@ -244,17 +168,27 @@ export function Simulation({ world }: { world: World }) {
         if (!car.active || n >= MAX_CARS) continue;
         world.pose(car, p);
 
+        const spec = VEHICLE[car.kind];
+
         q.setFromAxisAngle(up, p.angle);
         pos.set(p.x, 0, p.z);
 
-        m.compose(pos, q, one);
+        bodyScale.set(spec.width, spec.height, spec.length);
+        m.compose(pos, q, bodyScale);
         body.setMatrixAt(n, m);
 
-        pos.y = 0.06;
+        pos.y = LAYER.shadow;
+        shadowScale.set(spec.width * 2.1, 1, spec.length * 1.5);
         sm.compose(pos, q, shadowScale);
         shadow.setMatrixAt(n, sm);
 
-        colour.set(VEHICLE_COLORS[car.colour % VEHICLE_COLORS.length].hex);
+        // A livery overrides the fleet distribution: a bus is blue because it is
+        // a bus, not because the palette rolled that way.
+        colour.set(
+          spec.colour === "palette"
+            ? VEHICLE_COLORS[car.colour % VEHICLE_COLORS.length].hex
+            : spec.colour,
+        );
         body.setColorAt(n, colour);
         n++;
 
@@ -264,13 +198,15 @@ export function Simulation({ world }: { world: World }) {
 
         if (dark && head && tail && beam && lit + 2 <= MAX_LAMPS) {
           for (const [along, mesh] of [
-            [CAR_LENGTH * LAMP_ALONG, head],
-            [-CAR_LENGTH * LAMP_ALONG, tail],
+            [spec.length * LAMP_ALONG, head],
+            [-spec.length * LAMP_ALONG, tail],
           ] as const) {
-            for (const side of [CAR_WIDTH * 0.32, -CAR_WIDTH * 0.32]) {
+            for (const side of [spec.width * 0.32, -spec.width * 0.32]) {
+              // Lamps sit low on a car and high on a bus; a fraction of the
+              // body height puts them on the right part of the face either way.
               lampPos.set(
                 p.x + fx * along + fz * side,
-                0.62,
+                spec.height * 0.44,
                 p.z + fz * along - fx * side,
               );
               lamp.compose(lampPos, q, one);
@@ -280,10 +216,11 @@ export function Simulation({ world }: { world: World }) {
 
           // The pool of light on the road, thrown ahead of the bonnet.
           lampPos.set(
-            p.x + fx * CAR_LENGTH * 0.95,
-            0.05,
-            p.z + fz * CAR_LENGTH * 0.95,
+            p.x + fx * spec.length * 0.95,
+            LAYER.beam,
+            p.z + fz * spec.length * 0.95,
           );
+          beamScale.set(spec.width * 2.4, 1, spec.length * 2.4);
           lamp.compose(lampPos, q, beamScale);
           beam.setMatrixAt(lit >> 1, lamp);
 
@@ -297,11 +234,11 @@ export function Simulation({ world }: { world: World }) {
         if (!on) continue;
 
         // Driver's right is local -X.
-        const side = (turn === "right" ? -1 : 1) * (CAR_WIDTH / 2);
-        for (const along of [CAR_LENGTH * 0.42, -CAR_LENGTH * 0.42]) {
+        const side = (turn === "right" ? -1 : 1) * (spec.width / 2);
+        for (const along of [spec.length * 0.42, -spec.length * 0.42]) {
           lampPos.set(
             p.x + fx * along + fz * side,
-            0.78,
+            spec.height * 0.56,
             p.z + fz * along - fx * side,
           );
           lamp.compose(lampPos, q, one);
