@@ -5,9 +5,12 @@
  * Adding an area is this command plus nothing else: the app picks up any JSON
  * in src/levels/osm/ automatically, so a new place is one fetch away.
  *
- *   node tools/fetchOsm.ts rogers --at 40.65695 -73.95323
- *   node tools/fetchOsm.ts shibuya --address "Shibuya Crossing, Tokyo"
- *   node tools/fetchOsm.ts soho --address "Soho, London" --radius 400
+ *   npm run fetch:osm -- rogers --at 40.65695 -73.95323
+ *   npm run fetch:osm -- shibuya --address "Shibuya Crossing, Tokyo"
+ *   npm run fetch:osm -- soho --address "Soho, London" --radius 400
+ *
+ * Or `node tools/fetchOsm.ts <same args>` — the script only exists so the path
+ * is one less thing to remember.
  *
  * `--radius` is half the square's side in metres (default 300, so a 600m box).
  * Much past 500 and you are back to watching a city rather than a junction.

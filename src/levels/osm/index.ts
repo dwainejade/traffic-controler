@@ -7,7 +7,7 @@ import { importOsm, type OsmFile } from "./import";
  * These are the areas that ship with the game. Adding one is one command and
  * no code:
  *
- *   node tools/fetchOsm.ts shibuya --address "Shibuya Crossing, Tokyo"
+ *   npm run fetch:osm -- shibuya --address "Shibuya Crossing, Tokyo"
  *
  * Areas the player imports themselves never come through here — they are
  * fetched at runtime and kept in the browser; see `importArea.ts`.

@@ -22,7 +22,7 @@ export const RADIUS_WARN = 450;
 
 export type ImportPhase =
   | { kind: "idle" }
-  | { kind: "fetching"; endpoint: string; index: number; total: number }
+  | { kind: "fetching"; endpoint: string; index: number; total: number; retry: boolean }
   | { kind: "compiling" }
   | { kind: "checking" }
   | { kind: "saving" }
@@ -91,6 +91,7 @@ export async function importArea(
             endpoint: host(p.endpoint),
             index: p.index,
             total: p.total,
+            retry: p.retry,
           });
         }
       },
@@ -98,11 +99,20 @@ export async function importArea(
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") throw err;
     if (err instanceof OverpassError) {
-      const timedOut = err.attempts.some((a) => /timed out|out of memory/i.test(a.error));
+      /*
+       * The three failures need three different sentences, because they ask
+       * for three different things: wait, shrink the box, or check the
+       * connection. Saying "every mirror is busy" over a query that was simply
+       * too large sends somebody off retrying the same doomed import.
+       */
+      const kinds = new Set(err.attempts.map((a) => a.kind));
+      const message = kinds.has("tooBig")
+        ? "That area is too big for the map server. Try a smaller radius."
+        : kinds.has("busy")
+          ? "OpenStreetMap is busy right now — it turned us away. Wait a minute and try again."
+          : "Couldn't reach OpenStreetMap. Check your connection.";
       throw new ImportError(
-        timedOut
-          ? "That area is too big for the map server. Try a smaller radius."
-          : "Every OpenStreetMap mirror is busy. Try again in a minute.",
+        message,
         err.attempts.map((a) => `${host(a.endpoint)}: ${a.error}`).join("\n"),
       );
     }

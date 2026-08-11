@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   importArea,
   validateInput,
@@ -23,7 +23,9 @@ import { MAX_AREAS, useLevels } from "../levels/registry";
 function phaseLabel(p: ImportPhase): string {
   switch (p.kind) {
     case "fetching":
-      return `Asking ${p.endpoint} (${p.index + 1} of ${p.total})…`;
+      return p.retry
+        ? `Asking ${p.endpoint} again (${p.index + 1} of ${p.total})…`
+        : `Asking ${p.endpoint} (${p.index + 1} of ${p.total})…`;
     case "compiling":
       return "Building the street network…";
     case "checking":
@@ -46,6 +48,23 @@ export function ImportForm({ onImported }: { onImported: (id: string) => void })
 
   const busy = phase.kind !== "idle" && phase.kind !== "error";
   const full = saved.length >= MAX_AREAS;
+
+  /*
+   * A running clock, because this can legitimately take a minute or two and
+   * "Asking overpass-api.de…" on its own is indistinguishable from a hang. It
+   * is also the honest way to make somebody's patience their own decision:
+   * there is a Cancel button right beside it.
+   */
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!busy) return;
+    setElapsed(0);
+    const started = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 500);
+    return () => clearInterval(id);
+    // Only on the transition into a run — not on every phase change, or the
+    // clock restarts when the fetch hands over to the compile.
+  }, [busy]);
 
   /*
    * Coordinates get copied out of a map as a pair, not as two numbers, so
@@ -171,7 +190,9 @@ export function ImportForm({ onImported }: { onImported: (id: string) => void })
       {busy ? (
         <div className="import-busy">
           <span className="import-spinner" />
-          <span>{phaseLabel(phase)}</span>
+          <span>
+            {phaseLabel(phase)} <b>{elapsed}s</b>
+          </span>
           <button type="button" className="btn" onClick={() => abort.current?.abort()}>
             Cancel
           </button>
