@@ -41,6 +41,8 @@ export type LayerState = {
   perspective: boolean;
   /** Blur what the player isn't looking at. */
   depthOfField: boolean;
+  /** Autonomous low aerial flyover, edge to edge. Press C to jump to a new path. */
+  cinematicCamera: boolean;
 };
 
 export type LayerName = keyof LayerState;
@@ -72,6 +74,11 @@ export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
     name: "depthOfField",
     label: "Depth of field",
     hint: "Blur what you aren't looking at, like a tilt-shift model photo",
+  },
+  {
+    name: "cinematicCamera",
+    label: "Cinematic camera",
+    hint: "Slow aerial flyover, edge to edge. Press C for a new path, or drag/scroll/WASD to cancel",
   },
 ];
 
@@ -142,6 +149,7 @@ export const useHud = create<HudState>(() => ({
     parking: true,
     perspective: true,
     depthOfField: true,
+    cinematicCamera: false,
   },
   timeOfDay: hourOfDay(0),
   state: "running",
@@ -152,7 +160,12 @@ export const useHud = create<HudState>(() => ({
 
 export function toggleLayer(name: LayerName): void {
   const { layers } = useHud.getState();
-  useHud.setState({ layers: { ...layers, [name]: !layers[name] } });
+  const next = !layers[name];
+  const patch: Partial<LayerState> = { [name]: next };
+  // Aerial motion needs real parallax — flat ortho would just look like the
+  // map sliding around, not a camera moving through space.
+  if (name === "cinematicCamera" && next) patch.perspective = true;
+  useHud.setState({ layers: { ...layers, ...patch } });
 }
 
 export function selectJunction(id: NodeId): void {

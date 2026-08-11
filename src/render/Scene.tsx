@@ -13,6 +13,7 @@ import { Footprints } from "./Footprints";
 import { Trees } from "./Trees";
 import { scatterLevel } from "./scatter";
 import { Controls } from "./Controls";
+import { CinematicCamera } from "./CinematicCamera";
 import { BusStops } from "./BusStops";
 import { ParkedCars } from "./ParkedCars";
 import { Simulation } from "./Simulation";
@@ -216,6 +217,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
   const showParking = useHud((s) => s.layers.parking);
   const perspective = useHud((s) => s.layers.perspective);
   const depthOfField = useHud((s) => s.layers.depthOfField);
+  const cinematic = useHud((s) => s.layers.cinematicCamera);
 
   /*
    * Frame the whole map whatever its size, so a 49-junction city opens showing
@@ -227,6 +229,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
   return (
     <Canvas
       orthographic
+      dpr={[1, 2]}
       shadows={{ type: THREE.PCFShadowMap }}
       camera={{ position: CAMERA_POS, zoom, near: 1, far: 10000 }}
       gl={{
@@ -280,6 +283,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       <Daylight level={level} world={world} />
 
       <Controls level={level} />
+      {cinematic && <CinematicCamera level={level} />}
 
       <Ground level={level} />
       <Parks zones={level.zones} />

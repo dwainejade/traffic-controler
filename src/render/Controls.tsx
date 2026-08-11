@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { OrbitControls } from "@react-three/drei";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
@@ -16,6 +16,7 @@ import type { LevelDef } from "../sim/types";
 export function Controls({ level }: { level: LevelDef }) {
   const ref = useRef<OrbitControlsImpl>(null);
   const focus = useHud((s) => s.focus);
+  const cinematic = useHud((s) => s.layers.cinematicCamera);
   const flyTo = useRef<{ target: THREE.Vector3; t: number } | null>(null);
 
   /*
@@ -306,6 +307,11 @@ export function Controls({ level }: { level: LevelDef }) {
   };
 
   useFrame((_, delta) => {
+    // CinematicCamera owns the camera transform directly while active, and
+    // OrbitControls is unmounted below, so this ref is already null then —
+    // but bail explicitly rather than relying on mount timing.
+    if (cinematic) return;
+
     const controls = ref.current;
     if (!controls) return;
 
@@ -331,10 +337,48 @@ export function Controls({ level }: { level: LevelDef }) {
     }
   });
 
+  /*
+   * Where OrbitControls should pick up when it remounts after cinematic mode
+   * hands control back — the ground point the aerial camera was looking at,
+   * found the same way the zoom pivot above is (drop the camera's forward
+   * ray onto the ground plane). Without this the controls default to a
+   * target at the map origin, which can leave the camera outside
+   * minDistance/maxPolarAngle and snap on its very first update.
+   *
+   * Recomputed only when `cinematic` itself changes — the moment that
+   * matters is true -> false, right as CinematicCamera has left the camera
+   * mid-flight.
+   */
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const initialTarget = useMemo(() => {
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    const t = forward.y < -1e-3 ? -camera.position.y / forward.y : 0;
+    const x = THREE.MathUtils.clamp(
+      camera.position.x + forward.x * t,
+      -panLimit,
+      panLimit,
+    );
+    const z = THREE.MathUtils.clamp(
+      camera.position.z + forward.z * t,
+      -panLimit,
+      panLimit,
+    );
+    return new THREE.Vector3(x, 0, z);
+  }, [cinematic]);
+
+  // Unmounted rather than merely disabled while cinematic is active: three's
+  // OrbitControls recomputes the camera transform from its own target and
+  // spherical state every frame it's mounted, which fights CinematicCamera
+  // writing to camera.position/lookAt directly. See DevHandle.lookAt in
+  // Scene.tsx for the same constraint on a smaller scale.
+  if (cinematic) return null;
+
   return (
     <OrbitControls
       ref={ref}
       makeDefault
+      target={initialTarget}
       onChange={clampTarget}
       enableDamping
       dampingFactor={0.08}
