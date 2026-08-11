@@ -1,11 +1,11 @@
-import { pairKey, type ConflictMap } from "./conflicts";
+import { pairKey, type Priority } from "./conflicts";
 import type { Arm, LaneId, Network } from "./network";
 import type { NodeId } from "./types";
 
 /**
  * A phase is just a set of connectors allowed to run green together. A phase is
- * *illegal* if any two of its connectors cross — that single rule will later
- * power the phase editor, the tutorial and the crash system alike.
+ * *illegal* if any two of its connectors cross in a way neither can yield out
+ * of — see `buildPriority`, which decides which crossings those are.
  */
 export type Phase = {
   id: number;
@@ -67,22 +67,42 @@ export type Junction = {
   green: Set<LaneId>;
 };
 
-/** Clearance timings. These are what stop a phase change from being a teleport. */
+/**
+ * Clearance timings, taken from the standard traffic-engineering formulas
+ * rather than chosen by feel, and evaluated at the 25 mph New York City default
+ * limit (11.2 m/s):
+ *
+ *   amber  = reaction + v / (2a)        = 1.0 + 11.2 / (2 x 3.0)  = 2.9s
+ *   allRed = (junction width + car) / v = (19 + 4.4) / 11.2       = 2.1s
+ *
+ * Amber is floored at the 3.0s minimum every US signal manual specifies, which
+ * binds here: the formula's 2.9s is below it. The lower design speed does not
+ * buy back much clearance, then — 5.1s a change against 5.0s — because a slower
+ * car also takes longer to cross the box, and the two effects nearly cancel.
+ *
+ * That five seconds per phase change, serving nobody, is the whole reason real
+ * cycles run 90-120s: long cycles amortise the loss and short ones bleed
+ * capacity. Making it honest is what gives cycle length its shape as a decision.
+ */
 export const TIMING: Timing = {
   minGreen: 3.0,
-  /**
-   * Shorter than a real junction's. Realistic clearance (2.6s + 1.8s) burns
-   * ~24% of a four-phase cycle, which reads as the game being sluggish rather
-   * than as the player being slow.
-   */
-  amber: 2.2,
-  allRed: 1.2,
+  amber: 3.0,
+  allRed: 2.1,
 };
 
-/** Compass letter for a direction leaving a junction. -z is north on these maps. */
+const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"] as const;
+
+/**
+ * Compass bearing for a direction leaving a junction; -z is north on these maps.
+ *
+ * Eight points rather than four: a junction with five or more arms has to give
+ * two of them the same letter under a four-point rose, and phase names then
+ * collide into "W left" and "W left 2", which tells the player nothing.
+ */
 function bearing(out: { x: number; z: number }): string {
-  if (Math.abs(out.z) >= Math.abs(out.x)) return out.z < 0 ? "N" : "S";
-  return out.x > 0 ? "E" : "W";
+  const deg = (Math.atan2(out.x, -out.z) * 180) / Math.PI;
+  const index = Math.round(((deg + 360) % 360) / 45) % 8;
+  return COMPASS[index];
 }
 
 /** Human label for a set of movements, from the arms they leave and the turns they make. */
@@ -116,106 +136,79 @@ function nameFor(net: Network, arms: Arm[], group: LaneId[]): string {
 /**
  * Build a signal plan from the junction's conflict graph.
  *
- * A phase is a set of movements no two of which cross — an independent set in
- * that graph — and covering every movement in as few phases as possible is
- * graph colouring. Deriving phases this way rather than from geometry is what
- * makes arbitrary junctions work: T-junctions, five-way, staggered and skewed
- * all fall out of the same rule.
+ * **A phase is a set of whole approaches, not a set of movements.** An approach
+ * has one signal head showing one colour, and on a green ball every movement off
+ * that approach may go — straight, left and right together, the left giving way
+ * to oncoming. When the head is red, *nothing* off that approach may go.
  *
- * The previous approach paired arms that pointed roughly opposite, which held
- * for a symmetric cross and silently emitted *conflicting* phases for anything
- * else.
+ * That second half is the part worth stating plainly, because an earlier
+ * version got it wrong in a way that is invisible unless you look: it colour-ed
+ * individual movements and then let any movement join any other phase it did
+ * not conflict with. Right turns conflict with almost nothing, so they were
+ * being served in every phase — an approach sitting at a red would still be
+ * releasing its right-turning traffic. That is right-turn-on-red, which New
+ * York prohibits outright, and it also made the signal head over a red approach
+ * light up green.
+ *
+ * So arms are what get coloured. Two arms may share a phase when no movement of
+ * one *hard*-conflicts with any movement of the other; a permissive left across
+ * oncoming traffic is not a hard conflict and so does not split them. On a
+ * crossroads that gives exactly two phases — north with south, then east with
+ * west — and every other layout, from a T to a five-way, falls out of the same
+ * rule without special cases.
  */
 export function buildPhases(
   net: Network,
   nodeId: NodeId,
-  conflicts: ConflictMap,
+  priority: Priority,
 ): Phase[] {
   const arms = net.armsByJunction.get(nodeId) ?? [];
   const movements = net.connectorsByJunction.get(nodeId) ?? [];
   if (movements.length === 0) return [];
 
-  const crosses = (a: LaneId, b: LaneId) => conflicts.pairs.has(pairKey(a, b));
+  // Only arms that actually release traffic need a green.
+  const live = arms.filter((arm) => arm.connectorIds.length > 0);
+  if (live.length === 0) return [];
 
-  const degree = new Map<LaneId, number>();
-  for (const a of movements) {
-    degree.set(a, movements.filter((b) => b !== a && crosses(a, b)).length);
+  const crosses = (a: LaneId, b: LaneId) => priority.hard.has(pairKey(a, b));
+
+  /** Two approaches clash when any movement off one hard-conflicts with any off the other. */
+  const armsClash = (a: Arm, b: Arm) =>
+    a.connectorIds.some((m) => b.connectorIds.some((n) => crosses(m, n)));
+
+  const clashCount = new Map<Arm, number>();
+  for (const arm of live) {
+    clashCount.set(arm, live.filter((other) => other !== arm && armsClash(arm, other)).length);
   }
 
   /*
-   * Order matters more than the colouring itself.
-   *
-   * Straight movements are seeded first so that opposing throughs — which never
-   * conflict — land in the same phase and each phase serves two approaches at
-   * once. Colouring purely by conflict degree puts the heavily-conflicting left
-   * turns in first, and a left blocks the opposing through, which silently
-   * produces split phasing: four phases each serving a single arm, at roughly
-   * half the capacity. Separating protected lefts is exactly why real junctions
-   * are phased this way.
+   * Most-constrained first. An arm that clashes with everything has to seed its
+   * own phase, and seeding it early leaves the freer arms to fill in around it;
+   * taking the easy arms first strands the hard one in a phase of its own at
+   * the end and costs an extra phase change every cycle.
    */
-  const rank: Record<string, number> = { straight: 0, right: 1, left: 2 };
-  const ordered = [...movements].sort(
-    (a, b) =>
-      rank[net.lanes[a].turn ?? "left"] - rank[net.lanes[b].turn ?? "left"] ||
-      degree.get(b)! - degree.get(a)! ||
-      a - b,
+  const ordered = [...live].sort(
+    (a, b) => clashCount.get(b)! - clashCount.get(a)! || a.roadId.localeCompare(b.roadId),
   );
 
-  const cores: LaneId[][] = [];
-  for (const movement of ordered) {
-    const fit = cores.find((g) => g.every((m) => !crosses(movement, m)));
-    if (fit) fit.push(movement);
-    else cores.push([movement]);
+  const groups: Arm[][] = [];
+  for (const arm of ordered) {
+    const fit = groups.find((g) => g.every((other) => !armsClash(arm, other)));
+    if (fit) fit.push(arm);
+    else groups.push([arm]);
   }
 
-  // A movement may also run in any *other* phase it doesn't conflict with. That
-  // costs nothing — the phase is green regardless — and serves the movement more
-  // often, which is exactly why real signals run right turns in several phases.
-  const groups = cores.map((core) => {
-    const full = [...core];
-    for (const movement of movements) {
-      if (full.includes(movement)) continue;
-      if (full.every((m) => !crosses(movement, m))) full.push(movement);
-    }
-    return full;
-  });
-
-  // Augmenting can leave a phase that serves nothing another phase doesn't.
-  const keep = groups
-    .map((_, i) => i)
-    .filter(
-      (i) =>
-        !groups.some(
-          (other, k) =>
-            k !== i &&
-            (other.length > groups[i].length ||
-              (other.length === groups[i].length && k < i)) &&
-            groups[i].every((m) => other.includes(m)),
-        ),
-    );
-
   const used = new Map<string, number>();
-  return keep.map((index, i) => {
-    /*
-     * Name a phase by what it *uniquely* serves.
-     *
-     * Right turns conflict with almost nothing, so augmentation puts them in
-     * nearly every phase — naming from the whole set yields "E–N–S–W through"
-     * for all of them. The movements only this phase greens are precisely the
-     * reason it exists, and are what the player needs in order to decide how
-     * much time to give it.
-     */
-    const exclusive = groups[index].filter(
-      (m) => !keep.some((k) => k !== index && groups[k].includes(m)),
-    );
-    const base = nameFor(net, arms, exclusive.length > 0 ? exclusive : cores[index]);
+  return groups.map((group, i) => {
+    const connectors = group.flatMap((arm) => arm.connectorIds);
+    const base = nameFor(net, arms, connectors);
     const seen = used.get(base) ?? 0;
     used.set(base, seen + 1);
     return {
       id: i,
       // Names are React keys and group-mapping handles, so they must be unique.
       name: seen === 0 ? base : `${base} ${seen + 1}`,
-      connectors: [...groups[index]].sort((a, b) => a - b),
+      connectors: [...connectors].sort((a, b) => a - b),
     };
   });
 }
@@ -233,29 +226,54 @@ export function uncoveredMovements(
 }
 
 /**
- * Starting program: every phase gets the same green time.
+ * Cycle length every junction starts on, whatever its shape.
  *
- * Deliberately mediocre. An even split serves the low-demand left-turn phases
- * as generously as the heavy through phases, which measurably wastes cycle time
- * — so improving on this default is the game.
+ * Targeting a *cycle* rather than a fixed green per phase is what keeps complex
+ * junctions sane. A fixed 20s green puts a three-phase T on 75s and a seven-phase
+ * five-way on 175s — well beyond the ~120s ceiling real practice observes. Real
+ * engineers do the reverse: pick a cycle, then divide it. A junction with more
+ * phases gets shorter greens, not a longer wait.
+ *
+ * 60s is the standard New York local cycle, and it is also where the measured
+ * numbers put it. This was 100s, which suited the old four-phase protected
+ * plans and is far too long for the two-phase ones that replaced them: a
+ * two-phase junction on a 100s cycle spends 45s of green on each direction,
+ * most of it on an approach that emptied twenty seconds earlier, while the
+ * other direction queues. Traced over twelve minutes on Rogers Avenue at 0.9
+ * cars/s, cars on the map climbed 76 → 173 and network delay 15s → 76s and both
+ * were still rising — the network was simply not clearing. At 60s it settles at
+ * about 140 cars and 42s, and at 45s a little better again.
+ *
+ * The default is left deliberately mediocre rather than optimal: an even split
+ * on a stable cycle is something the player can beat, which is the game.
  */
-export const DEFAULT_GREEN = 12;
+export const TARGET_CYCLE = 60;
 
-export function defaultProgram(phaseCount: number): Program {
-  return { splits: new Array(phaseCount).fill(DEFAULT_GREEN) };
+export function defaultProgram(phaseCount: number, timing: Timing): Program {
+  if (phaseCount === 0) return { splits: [] };
+  const usable = TARGET_CYCLE - phaseCount * clearanceCost(timing);
+  // An even split is deliberately mediocre — it serves the light left-turn
+  // phases as generously as the heavy through ones, so improving on it is the
+  // game. The floor matters on many-phase junctions, where the target cycle
+  // cannot be met without starving every phase.
+  const green = Math.max(MIN_GREEN, usable / phaseCount);
+  return { splits: new Array(phaseCount).fill(green) };
 }
+
+/** Shortest green worth giving a phase; below this the queue barely moves. */
+export const MIN_GREEN = 6;
 
 export function createJunction(
   net: Network,
   nodeId: NodeId,
-  conflicts: ConflictMap,
+  priority: Priority,
 ): Junction {
-  const phases = buildPhases(net, nodeId, conflicts);
+  const phases = buildPhases(net, nodeId, priority);
   const j: Junction = {
     nodeId,
     phases,
     timing: { ...TIMING },
-    program: defaultProgram(phases.length),
+    program: defaultProgram(phases.length, { ...TIMING }),
     offset: 0,
     groupId: null,
     current: 0,
@@ -322,6 +340,49 @@ export function evaluateProgram(
 
   // Only reachable through floating-point slack at the very end of a cycle.
   return { phase: phaseCount - 1, state: "allRed", remaining: 0 };
+}
+
+/**
+ * Seconds until a movement's next green begins, and 0 while it is already
+ * running. This is what a countdown head displays.
+ *
+ * Walked forward through the phase windows rather than measured against the
+ * clock, because "when do I go" is not a property of the cycle but of one
+ * approach's place in it: every phase in between costs its green plus its
+ * clearance, and a driver waiting at a red is counting exactly that.
+ */
+export function timeToNextGreen(
+  j: Junction,
+  program: Program,
+  serves: (phaseIndex: number) => boolean,
+): number {
+  const count = j.phases.length;
+  if (count === 0) return 0;
+  if (j.state === "green" && serves(j.current)) return 0;
+
+  // Whatever is left of the window running now.
+  let t = j.timer;
+  let phase = j.current;
+  let state: SignalState = j.state;
+
+  // Every phase has three windows, so one full lap is an upper bound.
+  for (let guard = 0; guard < count * 3 + 3; guard++) {
+    if (state === "green") state = "amber";
+    else if (state === "amber") state = "allRed";
+    else {
+      state = "green";
+      phase = (phase + 1) % count;
+    }
+
+    if (state === "green") {
+      if (serves(phase)) return t;
+      t += Math.max(0, program.splits[phase] ?? 0);
+    } else {
+      t += state === "amber" ? j.timing.amber : j.timing.allRed;
+    }
+  }
+
+  return t;
 }
 
 export function stepJunction(j: Junction, clock: number, program: Program): void {

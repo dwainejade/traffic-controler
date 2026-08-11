@@ -1,4 +1,5 @@
-import { junctionSize, nodeById, roadWidth, type LevelDef } from '../sim/types'
+import { polyLength, roadCentreline, samplePoly } from '../sim/centreline'
+import { junctionSize, pavedWidth, roadEdges, type LevelDef } from '../sim/types'
 import { mulberry32 } from './geometry'
 
 export type BuildingInst = {
@@ -19,34 +20,127 @@ export type TreeInst = {
   dark: boolean
 }
 
-/** Squared distance from point p to segment ab, on the ground plane. */
-function distToSegment(
-  px: number, pz: number,
-  ax: number, az: number,
-  bx: number, bz: number,
-): number {
-  const dx = bx - ax
-  const dz = bz - az
+/** Even-odd point-in-polygon over an [x, z] loop. */
+export function pointInPolygon(x: number, z: number, poly: [number, number][]): boolean {
+  let inside = false
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, zi] = poly[i]
+    const [xj, zj] = poly[j]
+    if (zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi) {
+      inside = !inside
+    }
+  }
+  return inside
+}
+
+/**
+ * Uniform grid over every obstacle a scattered prop must avoid.
+ *
+ * Testing each candidate against every road is quadratic in the size of the
+ * city, and on a map with hundreds of streets that is genuinely fatal: the
+ * naive version took 67 seconds to place a city's buildings and trees, which on
+ * a page load looks exactly like a hang. Bucketing the segments first turns it
+ * into a handful of tests per candidate.
+ *
+ * `CELL` must be at least the largest query radius, so the 3x3 neighbourhood of
+ * a point's own cell is guaranteed to contain everything close enough to matter.
+ */
+const CELL_SIZE = 44
+
+type Obstacle = {
+  ax: number
+  az: number
+  bx: number
+  bz: number
+  /** Clearance this obstacle needs, before the caller's own margin. */
+  half: number
+  /** Junction boxes are square, and keeping them square matters at the corners. */
+  box?: boolean
+}
+
+type Index = Map<number, Obstacle[]>
+
+const indexCache = new WeakMap<LevelDef, Index>()
+
+function cellKey(cx: number, cz: number): number {
+  // Cantor-ish pairing into a single number; cheaper than a string key.
+  return (cx + 32768) * 65536 + (cz + 32768)
+}
+
+function buildIndex(level: LevelDef): Index {
+  const index: Index = new Map()
+
+  const insert = (o: Obstacle) => {
+    const pad = o.half + 12
+    const minX = Math.floor((Math.min(o.ax, o.bx) - pad) / CELL_SIZE)
+    const maxX = Math.floor((Math.max(o.ax, o.bx) + pad) / CELL_SIZE)
+    const minZ = Math.floor((Math.min(o.az, o.bz) - pad) / CELL_SIZE)
+    const maxZ = Math.floor((Math.max(o.az, o.bz) + pad) / CELL_SIZE)
+    for (let cx = minX; cx <= maxX; cx++) {
+      for (let cz = minZ; cz <= maxZ; cz++) {
+        const key = cellKey(cx, cz)
+        const list = index.get(key)
+        if (list) list.push(o)
+        else index.set(key, [o])
+      }
+    }
+  }
+
+  for (const road of level.roads) {
+    const poly = roadCentreline(level, road)
+    // Kerb to kerb: a building or tree must clear the parking bay and the bus
+    // lane, not just the moving lanes.
+    const half = pavedWidth(road) / 2
+    for (let i = 1; i < poly.length; i++) {
+      insert({ ax: poly[i - 1].x, az: poly[i - 1].z, bx: poly[i].x, bz: poly[i].z, half })
+    }
+  }
+
+  // Junction boxes go in as degenerate segments carrying their own half-size.
+  for (const node of level.nodes) {
+    if (node.kind !== 'junction') continue
+    const half = junctionSize(level, node.id) / 2
+    insert({ ax: node.pos[0], az: node.pos[1], bx: node.pos[0], bz: node.pos[1], half, box: true })
+  }
+
+  return index
+}
+
+/** Distance from a point to a segment, on the ground plane. */
+function distToSeg(px: number, pz: number, o: Obstacle): number {
+  const dx = o.bx - o.ax
+  const dz = o.bz - o.az
   const l2 = dx * dx + dz * dz
-  if (l2 === 0) return Math.hypot(px - ax, pz - az)
-  let t = ((px - ax) * dx + (pz - az) * dz) / l2
+  if (l2 === 0) return Math.hypot(px - o.ax, pz - o.az)
+  let t = ((px - o.ax) * dx + (pz - o.az) * dz) / l2
   t = Math.max(0, Math.min(1, t))
-  return Math.hypot(px - (ax + t * dx), pz - (az + t * dz))
+  return Math.hypot(px - (o.ax + t * dx), pz - (o.az + t * dz))
 }
 
 /** True if a point is far enough from every carriageway and junction box. */
 function isClear(level: LevelDef, x: number, z: number, margin: number): boolean {
-  for (const road of level.roads) {
-    const a = nodeById(level, road.from)
-    const b = nodeById(level, road.to)
-    const d = distToSegment(x, z, a.pos[0], a.pos[1], b.pos[0], b.pos[1])
-    if (d < roadWidth(road) / 2 + margin) return false
+  let index = indexCache.get(level)
+  if (!index) {
+    index = buildIndex(level)
+    indexCache.set(level, index)
   }
-  for (const node of level.nodes) {
-    if (node.kind !== 'junction') continue
-    const half = junctionSize(level, node.id) / 2
-    if (Math.abs(x - node.pos[0]) < half + margin && Math.abs(z - node.pos[1]) < half + margin) {
-      return false
+
+  const cx = Math.floor(x / CELL_SIZE)
+  const cz = Math.floor(z / CELL_SIZE)
+
+  for (let ix = cx - 1; ix <= cx + 1; ix++) {
+    for (let iz = cz - 1; iz <= cz + 1; iz++) {
+      const list = index.get(cellKey(ix, iz))
+      if (!list) continue
+      for (const o of list) {
+        if (o.box) {
+          if (Math.abs(x - o.ax) < o.half + margin && Math.abs(z - o.az) < o.half + margin) {
+            return false
+          }
+        } else if (distToSeg(x, z, o) < o.half + margin) {
+          return false
+        }
+      }
     }
   }
   return true
@@ -78,6 +172,8 @@ export function scatterLevel(level: LevelDef): {
         if (rand() < 0.12) continue // occasional gap, so blocks aren't uniform
         const bx = cx - hx + CELL / 2 + i * CELL + (rand() - 0.5) * 3
         const bz = cz - hz + CELL / 2 + j * CELL + (rand() - 0.5) * 3
+        // Polygon blocks scan their bounding box; only cells truly inside count.
+        if (zone.polygon && !pointInPolygon(bx, bz, zone.polygon)) continue
         if (!isClear(level, bx, bz, 9)) continue
 
         buildings.push({
@@ -93,27 +189,62 @@ export function scatterLevel(level: LevelDef): {
     }
   }
 
-  // --- Street trees down both sides of every road.
+  /*
+   * Street trees down both sides of every road, following its curve.
+   *
+   * Each side is offset from its own kerb rather than from a shared half-width,
+   * because a street is not necessarily symmetric: put both rows at half the
+   * paved width and the row on the side carrying the bus lane ends up planted
+   * in the road.
+   */
+  /*
+   * On a level with surveyed buildings the verge is not empty space — the
+   * footprints often come right up to the kerb, and a tree planted at a fixed
+   * offset ends up standing inside somebody's front room. Bounding boxes first,
+   * which rejects all but a handful before the polygon test runs at all.
+   */
+  const footprints = (level.footprints ?? []).map((f) => {
+    let minX = Infinity
+    let maxX = -Infinity
+    let minZ = Infinity
+    let maxZ = -Infinity
+    for (const [x, z] of f.polygon) {
+      if (x < minX) minX = x
+      if (x > maxX) maxX = x
+      if (z < minZ) minZ = z
+      if (z > maxZ) maxZ = z
+    }
+    return { poly: f.polygon, minX, maxX, minZ, maxZ }
+  })
+
+  const insideBuilding = (x: number, z: number): boolean => {
+    for (const f of footprints) {
+      if (x < f.minX || x > f.maxX || z < f.minZ || z > f.maxZ) continue
+      if (pointInPolygon(x, z, f.poly)) return true
+    }
+    return false
+  }
+
   for (const road of level.roads) {
-    const a = nodeById(level, road.from)
-    const b = nodeById(level, road.to)
-    const dx = b.pos[0] - a.pos[0]
-    const dz = b.pos[1] - a.pos[1]
-    const len = Math.hypot(dx, dz)
-    const ux = dx / len
-    const uz = dz / len
-    const lx = -uz
-    const lz = ux
-    const offset = roadWidth(road) / 2 + 3.6
+    const centre = roadCentreline(level, road)
+    const len = polyLength(centre)
+    const edges = roadEdges(road)
+    const VERGE = 3.6
 
     const PITCH = 9
     for (let d = 6; d < len - 4; d += PITCH) {
+      const p = samplePoly(centre, d)
       for (const side of [-1, 1]) {
         if (rand() < 0.25) continue
         const jitter = (rand() - 0.5) * 2.5
-        const x = a.pos[0] + ux * d + lx * side * (offset + jitter)
-        const z = a.pos[1] + uz * d + lz * side * (offset + jitter)
+        // `side` is +1 on the road's left, and the lateral convention here is
+        // positive to the right, hence the sign flip on the right-hand kerb.
+        const kerb = side > 0 ? -edges.left : edges.right
+        const offset = kerb + VERGE
+        const x = p.x - p.tz * side * (offset + jitter)
+        const z = p.z + p.tx * side * (offset + jitter)
         if (!isClear(level, x, z, 2.5)) continue
+        if (insideBuilding(x, z)) continue
         trees.push({
           x,
           z,
@@ -134,6 +265,7 @@ export function scatterLevel(level: LevelDef): {
     for (let i = 0; i < count; i++) {
       const x = cx + (rand() * 2 - 1) * (hx - 3)
       const z = cz + (rand() * 2 - 1) * (hz - 3)
+      if (zone.polygon && !pointInPolygon(x, z, zone.polygon)) continue
       if (!isClear(level, x, z, 3)) continue
       trees.push({
         x,

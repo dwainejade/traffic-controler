@@ -1,11 +1,21 @@
 import * as THREE from "three";
 import {
+  offsetPoly,
+  reversePoly,
+  roadCentreline,
+  tangentAt,
+  trimPoly,
+  type Pt,
+} from "./centreline";
+import {
   LANE_WIDTH,
   STOP_OFFSET,
   junctionSize,
   nodeById,
+  roadWidth,
   type LevelDef,
   type NodeId,
+  type RoadDef,
 } from "./types";
 
 export type LaneId = number;
@@ -85,6 +95,18 @@ export function rightOf(d: Vec2): Vec2 {
   return { x: -d.z, z: d.x };
 }
 
+/**
+ * Signed lateral offset of road lane `index` from the centreline, positive on
+ * the driver's right. Two-way lanes sit wholly on the driver's side; a one-way
+ * carriageway centres its lanes on the centreline instead. Shared with the
+ * validation harness, which asserts every built lane actually sits at this
+ * distance.
+ */
+export function laneLateralOffset(road: RoadDef, index: number): number {
+  const off = LANE_WIDTH * (index + 0.5);
+  return road.oneWay ? off - roadWidth(road) / 2 : off;
+}
+
 function polyline(points: Vec2[]): Pick<Lane, "pts" | "cum" | "length"> {
   const pts = new Float32Array(points.length * 2);
   const cum = new Float32Array(points.length);
@@ -148,36 +170,33 @@ export function buildNetwork(level: LevelDef): Network {
   const halfOf = (id: NodeId) =>
     nodeById(level, id).kind === "junction" ? junctionSize(level, id) / 2 : 0;
 
-  // --- Road lanes, both directions of every road.
+  // --- Road lanes, both directions of every road. Each direction's lanes are
+  // lateral offsets of the road centreline, trimmed back to the junction boxes.
+  // Trimming the *curve* by arc length keeps the setback constant however the
+  // road bends between its ends.
+  const trimmedByRoad = new Map<string, Pt[]>();
+
   for (const road of level.roads) {
     const a = nodeById(level, road.from);
     const b = nodeById(level, road.to);
 
-    for (const [start, end] of [
-      [a, b],
-      [b, a],
-    ] as const) {
-      const dx = end.pos[0] - start.pos[0];
-      const dz = end.pos[1] - start.pos[1];
-      const len = Math.hypot(dx, dz);
-      const u: Vec2 = { x: dx / len, z: dz / len };
-      const r = rightOf(u);
+    const centre = roadCentreline(level, road);
+    const trimmed = trimPoly(centre, halfOf(a.id), halfOf(b.id));
+    trimmedByRoad.set(road.id, trimmed);
 
-      const startAlong = halfOf(start.id);
-      const endAlong = halfOf(end.id);
+    // A one-way road emits lanes for the from→to direction only; the reverse
+    // simply never exists, and the graph downstream works over whatever is
+    // there. Arms on it end up with only inbound or only outbound lanes.
+    const directions = road.oneWay
+      ? ([[a, b, trimmed]] as const)
+      : ([
+          [a, b, trimmed],
+          [b, a, reversePoly(trimmed)],
+        ] as const);
 
+    for (const [start, end, poly] of directions) {
       for (let k = 0; k < road.lanesPerDir; k++) {
-        const off = LANE_WIDTH * (k + 0.5);
-        const geom = polyline([
-          {
-            x: start.pos[0] + u.x * startAlong + r.x * off,
-            z: start.pos[1] + u.z * startAlong + r.z * off,
-          },
-          {
-            x: end.pos[0] - u.x * endAlong + r.x * off,
-            z: end.pos[1] - u.z * endAlong + r.z * off,
-          },
-        ]);
+        const geom = polyline(offsetPoly(poly, laneLateralOffset(road, k)));
 
         const feedsJunction = end.kind === "junction";
         addLane({
@@ -205,16 +224,23 @@ export function buildNetwork(level: LevelDef): Network {
     const arms: Arm[] = [];
     for (const road of level.roads) {
       if (road.from !== node.id && road.to !== node.id) continue;
-      const otherId = road.from === node.id ? road.to : road.from;
-      const other = nodeById(level, otherId);
 
-      const dx = other.pos[0] - node.pos[0];
-      const dz = other.pos[1] - node.pos[1];
-      const len = Math.hypot(dx, dz);
+      /*
+       * The arm's outward direction is the road's *tangent* where it meets the
+       * junction box, not the chord between node centres. On a curved road the
+       * two diverge, and both turn classification and the compass naming read
+       * this vector — a chord here would silently misclassify turns.
+       */
+      const trimmed = trimmedByRoad.get(road.id)!;
+      const tangent =
+        road.from === node.id
+          ? tangentAt(trimmed, "start")
+          : tangentAt(trimmed, "end");
+      const sign = road.from === node.id ? 1 : -1;
 
       arms.push({
         roadId: road.id,
-        out: { x: dx / len, z: dz / len },
+        out: { x: tangent.x * sign, z: tangent.z * sign },
         inbound: lanes
           .filter((l) => l.roadId === road.id && l.toNode === node.id)
           .sort((p, q) => p.index - q.index)
@@ -249,26 +275,32 @@ export function buildNetwork(level: LevelDef): Network {
          * its phase blocks every straight-ahead car queued behind it, which
          * collapses junction capacity.
          */
-        const count = fromArm.inbound.length;
-        const lastIdx = count - 1;
-        const straightFrom =
-          count > 1 ? fromArm.inbound.map((_, k) => k).filter((k) => k > 0) : [0];
+        const lastIdx = fromArm.inbound.length - 1;
 
         /*
-         * Straight movements may land in any outbound lane, so the lateral shift
-         * happens inside the junction. Without this a car that goes straight is
-         * stuck in the through lane for good and can never reach the left pocket
-         * again — on a grid the router then sends it the long way round rather
-         * than turning left. Real junctions permit exactly this shift on a wide
-         * approach, and it avoids needing a full lane-change model on the links.
+         * Every movement holds its lane index: lane k in, lane k out.
+         *
+         * There is no lane-change model, so any pairing that moves a car
+         * laterally has to do it inside the junction, and every such scheme
+         * breaks something. Sending turns into any outbound lane makes opposing
+         * left turns cross, costing an extra phase and its clearance. Letting
+         * straight movements land anywhere makes lane 0→1 cross lane 1→0 within
+         * a single approach — a weave — which costs another. Holding the lane
+         * is the only pairing that stays conflict-free.
+         *
+         * The consequence is that a multi-lane approach partitions into
+         * independent lanes, so these levels use one lane per direction, where
+         * the question does not arise. Two-lane approaches need the real fix:
+         * lane changing on the links.
          */
         const pairs: [number, number][] =
           turn === "left"
             ? [[0, 0]]
             : turn === "right"
               ? [[lastIdx, toArm.outbound.length - 1]]
-              : straightFrom.flatMap((k) =>
-                  toArm.outbound.map((_, t) => [k, t] as [number, number]),
+              : fromArm.inbound.map(
+                  (_, k) =>
+                    [k, Math.min(k, toArm.outbound.length - 1)] as [number, number],
                 );
 
         for (const [fromK, toK] of pairs) {
@@ -309,7 +341,9 @@ export function buildNetwork(level: LevelDef): Network {
             p1,
           );
 
-          const samples = turn === "straight" ? 2 : 14;
+          // A straight movement between curved arms can join tangents that
+          // differ by several degrees; two points would snap cars sideways.
+          const samples = turn !== "straight" ? 14 : turnAngle > 0.05 ? 8 : 2;
           const pts = curve.getPoints(samples - 1).map((p) => ({ x: p.x, z: p.z }));
 
           const connector = addLane({

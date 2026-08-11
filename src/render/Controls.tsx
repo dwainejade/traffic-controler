@@ -1,7 +1,10 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { OrbitControls } from "@react-three/drei";
+import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
+import { useHud } from "../ui/hudStore";
+import type { LevelDef } from "../sim/types";
 
 /**
  * Orbit controls, deliberately fenced in. The player gets to look around and
@@ -10,11 +13,28 @@ import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
  * zooming past the point where the level card leaves the frame, and no panning
  * away from the level entirely.
  */
-export function Controls({ half }: { half: number }) {
+export function Controls({ level }: { level: LevelDef }) {
   const ref = useRef<OrbitControlsImpl>(null);
+  const focus = useHud((s) => s.focus);
+  const flyTo = useRef<{ target: THREE.Vector3; t: number } | null>(null);
 
-  // How far the look-at point may wander from the level centre.
-  const panLimit = half * 0.55;
+  /*
+   * Panning must reach the whole map. On a single junction a tight leash keeps
+   * the level centred, but a city is far larger than one screen and its
+   * congested junctions are, by definition, wherever you are not looking.
+   */
+  const half = level.half;
+  const panLimit = half * 0.95;
+  const minZoom = (370 / (half * Math.SQRT2)) * 0.85;
+  const maxZoom = 26;
+
+  /*
+   * The perspective camera's equivalents. It has no zoom — how much map you see
+   * is how far away you are — so the same two limits become a distance range:
+   * close enough to stand at a junction, far enough to see the whole card.
+   */
+  const minDistance = 70;
+  const maxDistance = half * 4.5;
 
   const clampTarget = () => {
     const controls = ref.current;
@@ -37,6 +57,208 @@ export function Controls({ half }: { half: number }) {
     t.y = 0;
   };
 
+  // The wheel handler and the key loop both live outside React's render, so
+  // they read the clamp through a ref rather than closing over a stale one.
+  const clampRef = useRef(clampTarget);
+  clampRef.current = clampTarget;
+
+  /*
+   * Zoom towards the pointer rather than the screen centre. OrbitControls only
+   * ever dollies about its target, which on a big map means the thing you are
+   * aiming at slides out of frame as you close in. So we take the zoom over:
+   * note the ground point under the cursor, apply the zoom, then shift the rig
+   * by however far that point moved. The point stays pinned under the pointer.
+   */
+  const camera = useThree((s) => s.camera);
+  const gl = useThree((s) => s.gl);
+
+  useEffect(() => {
+    const el = gl.domElement;
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const raycaster = new THREE.Raycaster();
+    const ndc = new THREE.Vector2();
+    const before = new THREE.Vector3();
+    const after = new THREE.Vector3();
+    const forward = new THREE.Vector3();
+    const pivot = new THREE.Vector3();
+
+    const groundUnderPointer = (e: WheelEvent, out: THREE.Vector3) => {
+      const rect = el.getBoundingClientRect();
+      ndc.set(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      raycaster.setFromCamera(ndc, camera);
+      return raycaster.ray.intersectPlane(plane, out);
+    };
+
+    const onWheel = (e: WheelEvent) => {
+      const controls = ref.current;
+      if (!controls || !controls.enabled) return;
+      e.preventDefault();
+
+      // Line- and page-mode wheels report in far smaller units than pixels.
+      const lines = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1;
+      const scale = Math.exp(-e.deltaY * lines * 0.0016);
+
+      const anchored = groundUnderPointer(e, before) !== null;
+
+      if (camera instanceof THREE.OrthographicCamera) {
+        const next = THREE.MathUtils.clamp(camera.zoom * scale, minZoom, maxZoom);
+        if (next === camera.zoom) return;
+        camera.zoom = next;
+        camera.updateProjectionMatrix();
+
+        if (anchored && groundUnderPointer(e, after)) {
+          const dx = before.x - after.x;
+          const dz = before.z - after.z;
+          controls.target.x += dx;
+          controls.target.z += dz;
+          camera.position.x += dx;
+          camera.position.z += dz;
+        }
+      } else {
+        /*
+         * A perspective camera zooms by moving. Sliding it a fraction of the way
+         * towards the ground point under the cursor is what keeps that point
+         * pinned; the pivot is then re-derived by dropping the camera's own
+         * forward ray onto the ground, so orbiting afterwards still turns about
+         * whatever is in the middle of the screen.
+         */
+        camera.getWorldDirection(forward);
+        if (forward.y > -1e-3) return; // Looking at or above the horizon.
+
+        if (anchored) camera.position.lerp(before, 1 - 1 / scale);
+
+        const t = -camera.position.y / forward.y;
+        pivot.copy(camera.position).addScaledVector(forward, t);
+        const distance = THREE.MathUtils.clamp(t, minDistance, maxDistance);
+        camera.position.copy(pivot).addScaledVector(forward, -distance);
+        controls.target.copy(pivot);
+      }
+
+      clampRef.current();
+      controls.update();
+    };
+
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [camera, gl, minZoom, maxZoom, minDistance, maxDistance]);
+
+  /*
+   * WASD pans, in screen terms rather than world terms: W is always "up the
+   * screen" whatever way the camera is currently facing, which is the only
+   * reading that survives orbiting.
+   */
+  const keys = useRef(new Set<string>());
+
+  useEffect(() => {
+    const interesting = (e: KeyboardEvent) => {
+      const k = e.key.toLowerCase();
+      return k === "w" || k === "a" || k === "s" || k === "d";
+    };
+    // Don't steal keystrokes from the HUD's inputs.
+    const typing = () => {
+      const el = document.activeElement;
+      return (
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        (el instanceof HTMLElement && el.isContentEditable)
+      );
+    };
+
+    const down = (e: KeyboardEvent) => {
+      if (!interesting(e) || e.metaKey || e.ctrlKey || e.altKey || typing()) return;
+      keys.current.add(e.key.toLowerCase());
+    };
+    const up = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
+    const blur = () => keys.current.clear();
+
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
+
+  // Fly the camera to a junction when the congestion list is clicked.
+  useEffect(() => {
+    if (!focus) return;
+    const node = level.nodes.find((n) => n.id === focus.id);
+    if (!node) return;
+    flyTo.current = {
+      target: new THREE.Vector3(node.pos[0], 0, node.pos[1]),
+      t: 0,
+    };
+  }, [focus, level]);
+
+  const panAxis = useRef(new THREE.Vector3());
+
+  /*
+   * Keyboard pan, in world units per second, scaled by the zoom so a keypress
+   * always crosses about the same amount of screen whether you are looking at
+   * one junction or the whole city.
+   */
+  const panBy = (x: number, z: number, delta: number) => {
+    const controls = ref.current;
+    if (!controls || (!x && !z)) return;
+
+    // Screen-relative either way: under ortho a screenful is 1/zoom of world,
+    // under perspective it is proportional to how far away the camera is.
+    const across =
+      camera instanceof THREE.OrthographicCamera
+        ? 520 / camera.zoom
+        : camera.position.distanceTo(controls.target) * 0.55;
+    const step = (across * delta) / Math.hypot(x, z);
+    const v = panAxis.current;
+
+    // Screen right, flattened onto the ground plane.
+    v.setFromMatrixColumn(camera.matrix, 0);
+    v.y = 0;
+    v.normalize().multiplyScalar(x * step);
+    controls.target.add(v);
+    camera.position.add(v);
+
+    // Column 2 points back towards the viewer, so +z reads as down-screen.
+    v.setFromMatrixColumn(camera.matrix, 2);
+    v.y = 0;
+    v.normalize().multiplyScalar(z * step);
+    controls.target.add(v);
+    camera.position.add(v);
+
+    clampRef.current();
+    controls.update();
+  };
+
+  useFrame((_, delta) => {
+    const controls = ref.current;
+    if (!controls) return;
+
+    if (controls.enabled && keys.current.size) {
+      const k = keys.current;
+      panBy(
+        (k.has("d") ? 1 : 0) - (k.has("a") ? 1 : 0),
+        (k.has("s") ? 1 : 0) - (k.has("w") ? 1 : 0),
+        delta,
+      );
+    }
+
+    const trip = flyTo.current;
+    if (!trip) return;
+
+    trip.t += delta;
+    // Ease in rather than snap, so you keep your bearings on a big map.
+    controls.target.lerp(trip.target, 1 - Math.pow(0.004, delta));
+    controls.update();
+
+    if (trip.t > 1.2 || controls.target.distanceTo(trip.target) < 0.5) {
+      flyTo.current = null;
+    }
+  });
+
   return (
     <OrbitControls
       ref={ref}
@@ -46,14 +268,24 @@ export function Controls({ half }: { half: number }) {
       dampingFactor={0.08}
       // Below ~18° the view flattens to a plan and the buildings stop reading;
       // above ~68° you start looking through the model edge-on.
-      minPolarAngle={THREE.MathUtils.degToRad(18)}
-      maxPolarAngle={THREE.MathUtils.degToRad(68)}
-      minZoom={2.2}
-      maxZoom={22}
+      minPolarAngle={THREE.MathUtils.degToRad(0)}
+      maxPolarAngle={THREE.MathUtils.degToRad(82)}
+      /*
+       * Zoom limits scale with the map. A fixed floor of 1 is fine for a single
+       * junction but on a city it is already tighter than the view that shows
+       * the whole thing, so the camera would fight you the moment you touched
+       * it. Out to the whole card, in to where individual cars read clearly.
+       */
+      minZoom={minZoom}
+      maxZoom={maxZoom}
+      minDistance={minDistance}
+      maxDistance={maxDistance}
+      // Zoom is handled above so it can track the pointer; OrbitControls only
+      // ever zooms about its target.
+      enableZoom={false}
       enablePan
       screenSpacePanning={false}
       rotateSpeed={0.6}
-      zoomSpeed={0.9}
       panSpeed={0.8}
     />
   );

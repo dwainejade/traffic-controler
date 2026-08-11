@@ -2,11 +2,22 @@ import { useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { PALETTE } from '../art/palette'
 import {
+  offsetPoly,
+  polyLength,
+  roadCentreline,
+  samplePoly,
+  type Pt,
+} from '../sim/centreline'
+import { laneLateralOffset } from '../sim/network'
+import {
   CROSSWALK_DEPTH,
   CROSSWALK_GAP,
+  LANE_WIDTH,
+  PARKING_WIDTH,
   STOP_OFFSET,
   junctionSize,
   nodeById,
+  roadEdges,
   roadWidth,
   type LevelDef,
 } from '../sim/types'
@@ -65,14 +76,96 @@ function InstancedRects({
   )
 }
 
+/**
+ * All roads' carriageways merged into one flat ribbon mesh. Each road walks its
+ * centreline and pushes a pair of mitred edge vertices per sample, so a curved
+ * street is exactly as cheap as a straight one: one draw call for every road
+ * surface on the map, another for the kerbs beneath them.
+ */
+/**
+ * Merge one geometry per item into a single buffer, each translated into place.
+ * The pieces are static, so this trades a rebuild on level load for one draw
+ * call instead of hundreds.
+ */
+function mergeAt<T extends { x: number; z: number }>(
+  items: T[],
+  make: (item: T) => THREE.BufferGeometry,
+): THREE.BufferGeometry {
+  const positions: number[] = []
+  const indices: number[] = []
+
+  for (const item of items) {
+    const g = make(item)
+    const pos = g.getAttribute('position')
+    const idx = g.getIndex()
+    const base = positions.length / 3
+
+    for (let i = 0; i < pos.count; i++) {
+      positions.push(pos.getX(i) + item.x, pos.getY(i), pos.getZ(i) + item.z)
+    }
+    if (idx) {
+      for (let i = 0; i < idx.count; i++) indices.push(base + idx.getX(i))
+    } else {
+      for (let i = 0; i < pos.count; i++) indices.push(base + i)
+    }
+    g.dispose()
+  }
+
+  const geom = new THREE.BufferGeometry()
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  const normals = new Float32Array(positions.length)
+  for (let i = 0; i < normals.length; i += 3) normals[i + 1] = 1
+  geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+  geom.setIndex(indices)
+  return geom
+}
+
+/**
+ * Ribbons are built from a pair of signed lateral offsets rather than a width,
+ * because a street is not necessarily symmetric about its centreline: a
+ * kerbside bus lane sits on one side only, and the paved surface has to grow on
+ * that side alone or the whole street visibly drifts off its own centre.
+ */
+function buildRibbons(items: { poly: Pt[]; left: number; right: number }[]): THREE.BufferGeometry {
+  const positions: number[] = []
+  const indices: number[] = []
+
+  for (const { poly, left: leftOff, right: rightOff } of items) {
+    const left = offsetPoly(poly, leftOff)
+    const right = offsetPoly(poly, rightOff)
+    const base = positions.length / 3
+
+    for (let i = 0; i < poly.length; i++) {
+      positions.push(left[i].x, 0, left[i].z, right[i].x, 0, right[i].z)
+    }
+    for (let i = 0; i < poly.length - 1; i++) {
+      // Wound so the face normal points up (+y); a downward winding would be
+      // backface-culled and the whole road would simply not draw.
+      const a = base + i * 2
+      indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2)
+    }
+  }
+
+  const geom = new THREE.BufferGeometry()
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  const normals = new Float32Array(positions.length)
+  for (let i = 0; i < normals.length; i += 3) normals[i + 1] = 1
+  geom.setAttribute('normal', new THREE.BufferAttribute(normals, 3))
+  geom.setIndex(indices)
+  return geom
+}
+
+const CURB_LIP = 0.7
+
 export function RoadNetwork({ level }: { level: LevelDef }) {
-  const { asphalt, curbs, markings, junctions } = useMemo(() => {
-    const asphalt: Rect[] = []
-    const curbs: Rect[] = []
+  const { asphaltGeom, curbGeom, busGeom, parkingGeom, markings, junctions } = useMemo(() => {
+    type Ribbon = { poly: Pt[]; left: number; right: number }
+    const asphaltItems: Ribbon[] = []
+    const curbItems: Ribbon[] = []
+    const busItems: Ribbon[] = []
+    const parkingItems: Ribbon[] = []
     const markings: Rect[] = []
     const junctions: { x: number; z: number; size: number }[] = []
-
-    const CURB_LIP = 0.7
 
     for (const node of level.nodes) {
       if (node.kind !== 'junction') continue
@@ -84,37 +177,66 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
     }
 
     for (const road of level.roads) {
-      const a = nodeById(level, road.from)
-      const b = nodeById(level, road.to)
       const w = roadWidth(road)
+      const edges = roadEdges(road)
+      const centre = roadCentreline(level, road)
+      const len = polyLength(centre)
 
-      const dx = b.pos[0] - a.pos[0]
-      const dz = b.pos[1] - a.pos[1]
-      const len = Math.hypot(dx, dz)
-      const angle = Math.atan2(dx, dz)
-      const ux = dx / len
-      const uz = dz / len
-      // Lateral unit vector, perpendicular to the road.
-      const lx = -uz
-      const lz = ux
-
-      const mx = (a.pos[0] + b.pos[0]) / 2
-      const mz = (a.pos[1] + b.pos[1]) / 2
-
-      asphalt.push({ x: mx, z: mz, angle, w, l: len })
-      curbs.push({ x: mx, z: mz, angle, w: w + CURB_LIP * 2, l: len })
-
-      // Distance measured from node `a` toward node `b`.
-      const at = (dist: number, lateral: number) => ({
-        x: a.pos[0] + ux * dist + lx * lateral,
-        z: a.pos[1] + uz * dist + lz * lateral,
+      // The full, untrimmed centreline: the carriageway tucks under the
+      // junction box exactly as the old full-length rect did.
+      asphaltItems.push({ poly: centre, left: edges.left, right: edges.right })
+      curbItems.push({
+        poly: centre,
+        left: edges.left - CURB_LIP,
+        right: edges.right + CURB_LIP,
       })
 
-      // On a grid a road can meet a junction at both ends, so each end is
-      // handled independently and the through-markings span whatever is left.
+      /*
+       * Bus lanes and parking are stacked outboard of the moving lanes, on top
+       * of the asphalt. Their extents come from the same arithmetic the kerb
+       * does, so the painted lane always lands exactly where the road model
+       * says it is rather than somewhere close.
+       */
+      const parking = road.parkingSides ?? 0
+      const parkRight = parking >= 1 ? PARKING_WIDTH : 0
+      const parkLeft = parking >= 2 ? PARKING_WIDTH : 0
+      const busFwd = (road.busLanes?.forward ?? 0) * LANE_WIDTH
+      const busBwd = road.oneWay ? 0 : (road.busLanes?.backward ?? 0) * LANE_WIDTH
+
+      if (parkRight > 0) {
+        parkingItems.push({ poly: centre, left: edges.right - parkRight, right: edges.right })
+      }
+      if (parkLeft > 0) {
+        parkingItems.push({ poly: centre, left: edges.left, right: edges.left + parkLeft })
+      }
+      if (busFwd > 0) {
+        const outer = edges.right - parkRight
+        busItems.push({ poly: centre, left: outer - busFwd, right: outer })
+      }
+      if (busBwd > 0) {
+        const outer = edges.left + parkLeft
+        busItems.push({ poly: centre, left: outer, right: outer + busBwd })
+      }
+
+      // A marking at arc distance s from the road's start, offset laterally to
+      // the driver's right of the from→to direction, aligned with the tangent
+      // (plus an optional extra twist, used by the one-way chevrons).
+      const mark = (s: number, lateral: number, mw: number, ml: number, twist = 0) => {
+        const p = samplePoly(centre, s)
+        markings.push({
+          x: p.x - p.tz * lateral,
+          z: p.z + p.tx * lateral,
+          angle: Math.atan2(p.tx, p.tz) + twist,
+          w: mw,
+          l: ml,
+        })
+      }
+
+      // A road can meet a junction at both ends; each end is handled
+      // independently and the through-markings span whatever is left.
       const ends = [
-        { node: a, from: 0, dir: 1 },
-        { node: b, from: len, dir: -1 },
+        { node: nodeById(level, road.from), from: 0, dir: 1 },
+        { node: nodeById(level, road.to), from: len, dir: -1 },
       ]
 
       let markStart = 2
@@ -128,89 +250,144 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
         // opposite lateral side from traffic leaving.
         const approachSide = -end.dir
 
-        // --- Crosswalk: bars parallel to traffic, banded across the carriageway.
+        // --- Crosswalk: bars parallel to traffic, banded kerb to kerb. It spans
+        // the paved width, not the driving width — a pedestrian crosses the
+        // parking strip and the bus lane too.
         const stripePitch = 1.6
-        const stripes = Math.floor(w / stripePitch)
-        const cwD = end.from + end.dir * (half + CROSSWALK_GAP + CROSSWALK_DEPTH / 2)
+        const paved = edges.right - edges.left
+        const stripes = Math.floor(paved / stripePitch)
+        const cwS = end.from + end.dir * (half + CROSSWALK_GAP + CROSSWALK_DEPTH / 2)
         for (let i = 0; i < stripes; i++) {
-          const lateral = -w / 2 + stripePitch / 2 + i * stripePitch
-          const p = at(cwD, lateral)
-          markings.push({ x: p.x, z: p.z, angle, w: 0.75, l: CROSSWALK_DEPTH })
+          const lateral = edges.left + stripePitch / 2 + i * stripePitch
+          mark(cwS, lateral, 0.75, CROSSWALK_DEPTH)
         }
 
-        // --- Stop line: spans only the approaching half of the carriageway.
-        const stopD = end.from + end.dir * (half + STOP_OFFSET)
-        const stopP = at(stopD, (approachSide * w) / 4)
-        markings.push({ x: stopP.x, z: stopP.z, angle, w: w / 2 - 0.3, l: 0.7 })
+        // --- Stop line: spans only the approaching half of the carriageway —
+        // or all of it on a one-way, which has no other half and only ever
+        // receives traffic at its `to` end.
+        const stopS = end.from + end.dir * (half + STOP_OFFSET)
+        if (!road.oneWay) {
+          mark(stopS, (approachSide * w) / 4, w / 2 - 0.3, 0.7)
+        } else if (end.dir === -1) {
+          mark(stopS, 0, w - 0.6, 0.7)
+        }
 
         const clear = half + STOP_OFFSET + 3
         if (end.dir > 0) markStart = clear
         else markEnd = len - clear
       }
 
-      const span = markEnd - markStart
-      if (span <= 0) continue
+      if (markEnd - markStart <= 0) continue
 
-      // --- Solid centreline. Solid, not dashed, so the two carriageways read as
-      // separate directions at a glance rather than as four identical lanes.
-      const cp = at(markStart + span / 2, 0)
-      markings.push({ x: cp.x, z: cp.z, angle, w: 0.45, l: span })
+      if (road.oneWay) {
+        // --- Direction chevrons instead of a centreline: two strokes meeting
+        // point-forward, repeated down each lane. Per lane, not per road: on a
+        // multi-lane one-way a single chevron on the centreline lands on the
+        // lane divider, pointing along the join between two lanes.
+        for (let s = markStart + 6; s < markEnd - 4; s += 18) {
+          for (let k = 0; k < road.lanesPerDir; k++) {
+            const centreOfLane = laneLateralOffset(road, k)
+            for (const side of [-1, 1]) {
+              mark(s, centreOfLane + side * 0.55, 0.35, 1.45, side * 0.94)
+            }
+          }
+        }
+      } else {
+        // --- Solid centreline, walked in short segments so it follows the
+        // curve. Solid, not dashed, so the two carriageways read as separate
+        // directions at a glance.
+        const SEG = 2.6
+        for (let s = markStart; s < markEnd; s += SEG) {
+          const segLen = Math.min(SEG + 0.12, markEnd - s)
+          mark(s + segLen / 2, 0, 0.45, segLen)
+        }
+      }
 
-      // --- Lane dividers, dashed, one per direction per extra lane.
+      /*
+       * Lane dividers, dashed, between adjacent moving lanes.
+       *
+       * The divider positions are taken straight from where the lanes actually
+       * are — the boundary between lane k-1 and lane k is the midpoint of their
+       * two centres — rather than derived independently from the road width. An
+       * earlier version divided the width by the lane count, which happened to
+       * agree for two-way roads and was wrong for every multi-lane one-way:
+       * a three-lane one-way got four dividers, two of them out in the kerb.
+       */
       const dashLen = 3.0
       const dashGap = 4.0
       if (road.lanesPerDir > 1) {
-        for (const side of [-1, 1]) {
+        const sides = road.oneWay ? [1] : [1, -1]
+        for (const side of sides) {
           for (let k = 1; k < road.lanesPerDir; k++) {
-            const lateral = side * (k * (w / (road.lanesPerDir * 2)))
-            let dd = markStart
-            while (dd < markEnd) {
-              const p = at(dd + dashLen / 2, lateral)
-              markings.push({ x: p.x, z: p.z, angle, w: 0.25, l: dashLen })
-              dd += dashLen + dashGap
+            const inner = laneLateralOffset(road, k - 1)
+            const outer = laneLateralOffset(road, k)
+            const lateral = side * ((inner + outer) / 2)
+            for (let s = markStart; s < markEnd; s += dashLen + dashGap) {
+              mark(s + dashLen / 2, lateral, 0.25, dashLen)
             }
           }
         }
       }
     }
 
-    return { asphalt, curbs, markings, junctions }
+    return {
+      asphaltGeom: buildRibbons(asphaltItems),
+      curbGeom: buildRibbons(curbItems),
+      busGeom: buildRibbons(busItems),
+      parkingGeom: buildRibbons(parkingItems),
+      markings,
+      junctions,
+    }
   }, [level])
 
-  const junctionGeoms = useMemo(
-    () => junctions.map((j) => flatRoundedRect(j.size / 2, j.size / 2, 3)),
+  /*
+   * Junction boxes, merged into one geometry each rather than a mesh apiece.
+   *
+   * A mesh per junction is fine at four junctions and quietly disastrous at
+   * four hundred: every junction was costing two draw calls and two material
+   * objects, so the boxes alone were most of the scene's draw calls while the
+   * roads, cars, buildings and trees together took under ten. They never move,
+   * so there is nothing to gain by keeping them separate.
+   */
+  const junctionGeom = useMemo(
+    () => mergeAt(junctions, (j) => flatRoundedRect(j.size / 2, j.size / 2, 3)),
     [junctions],
   )
-  const junctionCurbGeoms = useMemo(
-    () => junctions.map((j) => flatRoundedRect(j.size / 2 + 0.7, j.size / 2 + 0.7, 3.6)),
+  const junctionCurbGeom = useMemo(
+    () => mergeAt(junctions, (j) => flatRoundedRect(j.size / 2 + 0.7, j.size / 2 + 0.7, 3.6)),
     [junctions],
   )
 
   return (
     <group>
       {/* Casing sits just under the asphalt and reads as a curb lip. */}
-      <InstancedRects rects={curbs} color={PALETTE.curb} y={Y_CURB} />
-      {junctions.map((j, i) => (
-        <mesh
-          key={`jc-${i}`}
-          geometry={junctionCurbGeoms[i]}
-          position={[j.x, Y_CURB + 0.001, j.z]}
-        >
-          <meshLambertMaterial color={PALETTE.curb} />
-        </mesh>
-      ))}
+      <mesh geometry={curbGeom} position={[0, Y_CURB, 0]}>
+        <meshLambertMaterial color={PALETTE.curb} />
+      </mesh>
+      <mesh geometry={junctionCurbGeom} position={[0, Y_CURB + 0.001, 0]}>
+        <meshLambertMaterial color={PALETTE.curb} />
+      </mesh>
 
-      <InstancedRects rects={asphalt} color={PALETTE.road} y={Y_ROAD} />
-      {junctions.map((j, i) => (
-        <mesh
-          key={`ja-${i}`}
-          geometry={junctionGeoms[i]}
-          position={[j.x, Y_ROAD + 0.001, j.z]}
-          receiveShadow
-        >
-          <meshLambertMaterial color={PALETTE.road} />
-        </mesh>
-      ))}
+      <mesh geometry={asphaltGeom} position={[0, Y_ROAD, 0]} receiveShadow>
+        <meshLambertMaterial color={PALETTE.road} />
+      </mesh>
+      {/*
+        Surface paint, over the asphalt but under the junction boxes and the
+        white markings. The order is doing real work: the ribbons run the full
+        untrimmed centreline, so the box drawn on top of them is what stops the
+        bus lane and the parking bay at the crossing, and the markings drawn
+        after keep a stop bar legible where it lies across paint.
+      */}
+      <mesh geometry={parkingGeom} position={[0, Y_ROAD + 0.001, 0]} receiveShadow>
+        <meshLambertMaterial color={PALETTE.parking} />
+      </mesh>
+      <mesh geometry={busGeom} position={[0, Y_ROAD + 0.002, 0]} receiveShadow>
+        <meshLambertMaterial color={PALETTE.busLane} />
+      </mesh>
+
+      <mesh geometry={junctionGeom} position={[0, Y_ROAD + 0.003, 0]} receiveShadow>
+        <meshLambertMaterial color={PALETTE.road} />
+      </mesh>
 
       <InstancedRects rects={markings} color={PALETTE.marking} y={Y_MARK} />
     </group>

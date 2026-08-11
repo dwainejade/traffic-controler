@@ -7,8 +7,16 @@
  * exactly the same code path.
  */
 export const IDM = {
-  /** Desired free-flow speed, m/s (~50 km/h). */
-  v0: 13.9,
+  /**
+   * Desired free-flow speed, m/s.
+   *
+   * 11.2 m/s is 25 mph, which has been the default speed limit on every New
+   * York City street without a posted sign since 2014. It is not a cosmetic
+   * number: it feeds the amber and all-red formulas below, and a slower design
+   * speed means shorter clearance intervals and therefore more usable green in
+   * every cycle.
+   */
+  v0: 11.2,
   /** Safe time headway, s. */
   T: 1.3,
   /**

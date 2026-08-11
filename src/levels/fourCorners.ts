@@ -34,19 +34,19 @@ const sources: MapNode[] = [
 
 const roads: RoadDef[] = [
   // Internal links — these are the ones that can spill back.
-  { id: "r_top", from: "j00", to: "j10", lanesPerDir: 2 },
-  { id: "r_bottom", from: "j01", to: "j11", lanesPerDir: 2 },
-  { id: "r_left", from: "j00", to: "j01", lanesPerDir: 2 },
-  { id: "r_right", from: "j10", to: "j11", lanesPerDir: 2 },
+  { id: "r_top", from: "j00", to: "j10", lanesPerDir: 1 },
+  { id: "r_bottom", from: "j01", to: "j11", lanesPerDir: 1 },
+  { id: "r_left", from: "j00", to: "j01", lanesPerDir: 1 },
+  { id: "r_right", from: "j10", to: "j11", lanesPerDir: 1 },
   // Approaches from the map edge.
-  { id: "r_n0", from: "j00", to: "n0", lanesPerDir: 2 },
-  { id: "r_n1", from: "j10", to: "n1", lanesPerDir: 2 },
-  { id: "r_s0", from: "j01", to: "s0", lanesPerDir: 2 },
-  { id: "r_s1", from: "j11", to: "s1", lanesPerDir: 2 },
-  { id: "r_w0", from: "j00", to: "w0", lanesPerDir: 2 },
-  { id: "r_w1", from: "j01", to: "w1", lanesPerDir: 2 },
-  { id: "r_e0", from: "j10", to: "e0", lanesPerDir: 2 },
-  { id: "r_e1", from: "j11", to: "e1", lanesPerDir: 2 },
+  { id: "r_n0", from: "j00", to: "n0", lanesPerDir: 1 },
+  { id: "r_n1", from: "j10", to: "n1", lanesPerDir: 1 },
+  { id: "r_s0", from: "j01", to: "s0", lanesPerDir: 1 },
+  { id: "r_s1", from: "j11", to: "s1", lanesPerDir: 1 },
+  { id: "r_w0", from: "j00", to: "w0", lanesPerDir: 1 },
+  { id: "r_w1", from: "j01", to: "w1", lanesPerDir: 1 },
+  { id: "r_e0", from: "j10", to: "e0", lanesPerDir: 1 },
+  { id: "r_e1", from: "j11", to: "e1", lanesPerDir: 1 },
 ];
 
 const zones: ZoneDef[] = [
@@ -59,32 +59,32 @@ const zones: ZoneDef[] = [
   { id: "blk_s", kind: "block", centre: [0, H + 44], half: [24, 20] },
 ];
 
-export const LEVEL_2: LevelDef = {
-  id: "l2",
+export const FOUR_CORNERS: LevelDef = {
+  id: "four-corners",
   name: "Four Corners",
   half: H + TAIL,
   seed: 20260810,
   /*
-   * Measured over 180s, mean delivered across 16 seeds:
-   *   cycle 6s each   →  116  (and wildly variable — sd 18, one run as low as 65)
-   *   even 12s each   →  139
-   *   even 20s each   →  136
+   * 0.6 veh/s = 2160 veh/h, ~30s mean delay (level-of-service C).
    *
-   * Extended from 120s for the same reason as level 1: at 120s the plan effect
-   * (3.7 cars) was *smaller* than the seed noise (4.9), so the result was
-   * essentially a coin toss.
+   * Lowered from 1.1 because the grid was a lottery at that load: outcomes were
+   * bimodal, with a standard deviation of 34-52 cars and individual runs
+   * collapsing to 17 delivered when the network tipped into gridlock. Whether
+   * you won was mostly luck. At 0.6 the spread falls to 5-9 and the plan is
+   * what decides it.
    *
-   * The high variance of the short-cycle plan is the real character of this
-   * level — a grid at this demand either flows or tips into gridlock, and a
-   * cycle that wastes time on clearance is what tips it.
+   * Measured over 180s, mean delivered across 14 seeds:
+   *   even 20s  (cycle 100s)  →  103  delay 30s
+   *   even 12s  (cycle  68s)  →   98  delay 29s
+   *   even 34s  (cycle 156s)  →   96  delay 42s
    *
    * Note the 78m blocks cannot support a green wave: two-way progression needs
-   * cycle ~= 2x link travel time (11.2s here), and four phases of clearance
-   * alone cost 13.6s. Coordination is worth real time only on longer links.
+   * cycle ~= 2x link travel time (11.2s here), and four phases of clearance now
+   * cost 20s on their own. Coordination is worth real time only on longer links.
    */
-  quota: 130,
+  quota: 21,
   timeLimit: 180,
-  demand: 1.1,
+  demand: 0.15,
   nodes: [...junctions, ...sources],
   roads,
   zones,

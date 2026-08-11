@@ -23,6 +23,26 @@ export const PALETTE = {
   /** Lane markings, stop lines, crosswalks. */
   marking: '#FFFFFF',
 
+  /**
+   * Bus lane paint. The second saturated thing allowed into the environment,
+   * and it earns the exemption the same way it does in life: a bus lane is only
+   * useful if you can see at a glance that it is not for you. Kept dusty rather
+   * than the fire-engine red of fresh thermoplastic, so it sits with the rest.
+   */
+  busLane: '#C08276',
+  /** Parking strip: paved, but a shade off the running surface. */
+  parking: '#565C61',
+
+  /**
+   * Water around the island. The one place the palette's low-saturation rule
+   * bends: Apple Maps' water is a genuine blue, and it is what tells you at a
+   * glance that the pale shape in the middle is land. Kept light and slightly
+   * grey so it still sits behind the traffic rather than competing with it.
+   */
+  water: '#A8CDE0',
+  /** A touch deeper, for the strip right against the shore. */
+  waterDeep: '#93BDD4',
+
   /** Park fill. Accent only — never base terrain. */
   park: '#93C97E',
   treeFoliage: '#79B463',

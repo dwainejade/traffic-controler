@@ -26,8 +26,10 @@ import {
 import type { LevelDef, NodeId } from "./types";
 import {
   buildConflicts,
+  buildPriority,
   illegalPairsInPhase,
   type ConflictMap,
+  type Priority,
 } from "./conflicts";
 import { buildRouting, routeTo, type RoutingTables } from "./routing";
 import { mulberry32 } from "../render/geometry";
@@ -45,6 +47,14 @@ const TURN_SPEED: Record<TurnKind, number> = {
 
 /** How far ahead a car looks for a leader across lane boundaries. */
 const LOOKAHEAD = 90;
+
+/**
+ * Seconds of clear oncoming traffic a permissive left turn needs before it will
+ * commit. The traffic-engineering critical gap for a left across one opposing
+ * lane is about 4.5s; a little more is used here because a car that misjudges
+ * it in this model does not have a real driver's option of aborting halfway.
+ */
+const CRITICAL_GAP = 5.0;
 
 /**
  * Shortest green a phase may be given. Below roughly this, the queue barely
@@ -94,6 +104,16 @@ const CONFLICT_RADIUS = (CAR_LENGTH + CAR_WIDTH) / 2;
 export type WorldStats = {
   /** Cars that have completed their route. */
   delivered: number;
+  /**
+   * Cars created since construction (or reset). Unlike `delivered` this is NOT
+   * zeroed by warmup, so at any instant the books must balance:
+   * spawned = delivered-since-creation + retired + active. The validation
+   * harness asserts exactly that — a car that vanishes from the ledger is how
+   * lane-handover bugs announce themselves.
+   */
+  spawned: number;
+  /** Cars towed after a collision while warming or observing. Never warmup-zeroed. */
+  retired: number;
   /** Cars currently on the map. */
   active: number;
   elapsed: number;
@@ -101,14 +121,40 @@ export type WorldStats = {
   meanWait: number;
   /** Collisions cleared while observing. Always 0 during a scored run. */
   collisions: number;
+  /**
+   * Vehicle-hours of delay accumulated across every car on the map, finished or
+   * not. This is the measure a real traffic authority minimises, and the right
+   * score for a city: it counts the cars still stuck in a jam, which "delivered"
+   * conspicuously does not. Fixing the worst bottleneck moves it; polishing an
+   * already-free-flowing junction does not.
+   */
+  delayHours: number;
+  /** Mean seconds lost per car currently on the map. */
+  networkDelay: number;
 };
+
+/** Linear interpolation between two rush-profile points. */
+function interp(
+  t: number,
+  a: { t: number; mult: number },
+  b: { t: number; mult: number },
+): number {
+  const span = b.t - a.t;
+  if (span <= 0) return b.mult;
+  const u = (t - a.t) / span;
+  return a.mult + (b.mult - a.mult) * u;
+}
 
 const EMPTY_STATS = (): WorldStats => ({
   delivered: 0,
+  spawned: 0,
+  retired: 0,
   active: 0,
   elapsed: 0,
   meanWait: 0,
   collisions: 0,
+  delayHours: 0,
+  networkDelay: 0,
 });
 
 export class World {
@@ -126,6 +172,8 @@ export class World {
   signalClock = 0;
 
   readonly conflicts: ConflictMap;
+  /** Which crossings are illegal, and which are a give-way. */
+  readonly priority: Priority;
   readonly routing: RoutingTables;
 
   stats: WorldStats = EMPTY_STATS();
@@ -157,25 +205,30 @@ export class World {
   private warming = false;
   private rand: () => number;
   /** Map-edge entry points, with the lanes available at each. */
-  private entries: { node: NodeId; lanes: LaneId[] }[] = [];
+  private entries: { node: NodeId; lanes: LaneId[]; weight: number }[] = [];
+  /** Destination pick weights, aligned with `routing.destinations`. */
+  private attractWeights: number[] = [];
+  /** Cars spawned per entry node — the check that directional demand is real. */
+  readonly spawnByEntry = new Map<NodeId, number>();
 
   constructor(level: LevelDef) {
     this.level = level;
     this.net = buildNetwork(level);
     this.conflicts = buildConflicts(this.net);
+    this.priority = buildPriority(this.net, this.conflicts);
     this.routing = buildRouting(this.net);
     this.rand = mulberry32(level.seed ^ 0x9e3779b9);
     this.demand = level.demand;
 
     for (const node of level.nodes) {
       if (node.kind === "junction") {
-        const junction = createJunction(this.net, node.id, this.conflicts);
+        const junction = createJunction(this.net, node.id, this.priority);
         this.junctions.set(node.id, junction);
 
         if (import.meta.env?.DEV) {
           // Generated phases must never contain crossing movements.
           for (const phase of junction.phases) {
-            const bad = illegalPairsInPhase(this.conflicts, phase.connectors);
+            const bad = illegalPairsInPhase(this.priority, phase.connectors);
             if (bad.length > 0) {
               console.error(
                 `Phase "${phase.name}" at ${node.id} contains conflicting movements`,
@@ -206,7 +259,37 @@ export class World {
       list.push(id);
       byNode.set(node, list);
     }
-    this.entries = [...byNode].map(([node, lanes]) => ({ node, lanes }));
+    const weightOf = (id: NodeId, key: "spawnWeight" | "attractWeight") =>
+      Math.max(0, level.nodes.find((n) => n.id === id)?.[key] ?? 1);
+    this.entries = [...byNode].map(([node, lanes]) => ({
+      node,
+      lanes,
+      weight: weightOf(node, "spawnWeight"),
+    }));
+    this.attractWeights = this.routing.destinations.map((d) =>
+      weightOf(d, "attractWeight"),
+    );
+  }
+
+  /** Demand multiplier at elapsed time t, from the level's rush profile. */
+  rushMult(t: number): number {
+    const rush = this.level.rush;
+    if (!rush || rush.points.length === 0) return 1;
+    const pts = rush.points;
+    const last = pts[pts.length - 1];
+
+    let at = t;
+    if (rush.loop && last.t > 0) {
+      at = ((t % last.t) + last.t) % last.t;
+      // Between the wrap point and the first point, blend across the seam.
+      if (at <= pts[0].t) return interp(at, { t: 0, mult: last.mult }, pts[0]);
+    }
+
+    if (at <= pts[0].t) return pts[0].mult;
+    for (let i = 1; i < pts.length; i++) {
+      if (at <= pts[i].t) return interp(at, pts[i - 1], pts[i]);
+    }
+    return last.mult;
   }
 
   /**
@@ -229,6 +312,8 @@ export class World {
     this.stats.elapsed = 0;
     this.stats.meanWait = 0;
     this.stats.collisions = 0;
+    this.stats.delayHours = 0;
+    this.stats.networkDelay = 0;
     this.waitTotal = 0;
     for (const car of this.cars) car.waited = 0;
   }
@@ -419,9 +504,30 @@ export class World {
     this.drive(dt);
     this.checkCrashes();
 
-    if (this.state !== "running" || this.warming || this.observing) return;
+    // Mean delay carried by the traffic currently out there. Unlike meanWait,
+    // which only counts cars that finished, this rises the moment a jam forms.
+    let waiting = 0;
+    let count = 0;
+    for (const car of this.cars) {
+      if (!car.active) continue;
+      waiting += car.waited;
+      count++;
+    }
+    this.stats.networkDelay = count > 0 ? waiting / count : 0;
 
-    if (this.stats.delivered >= this.level.quota) {
+    // A sandbox level has no objective to win or lose — it just runs.
+    if (this.state !== "running" || this.warming || this.observing || this.level.sandbox) return;
+
+    const budget = this.level.delayBudget;
+    if (budget !== undefined) {
+      // Congestion objective: hold total delay under budget for the whole run.
+      if (this.stats.delayHours > budget) {
+        this.state = "lost";
+        this.failReason = "timeout";
+      } else if (this.stats.elapsed >= this.level.timeLimit) {
+        this.state = "won";
+      }
+    } else if (this.stats.delivered >= this.level.quota) {
       this.state = "won";
     } else if (this.stats.elapsed >= this.level.timeLimit) {
       this.state = "lost";
@@ -449,8 +555,16 @@ export class World {
           for (const idB of laneB.cars) {
             if (Math.abs(this.cars[idB].s - p.sB) > CONFLICT_RADIUS) continue;
 
-            if (this.observing) {
-              // Log it and clear the wreck, so watching can continue.
+            if (this.observing || this.warming || this.level.sandbox) {
+              /*
+               * Log it, clear the wreck, and carry on.
+               *
+               * Observing wants this because a sandbox that stops itself is not
+               * much of a sandbox. Warmup needs it for a subtler reason: a crash
+               * sets `state` to lost, after which every step returns immediately
+               * — so a single collision would silently halt the pre-fill and
+               * hand the player a half-populated map with no indication why.
+               */
               this.stats.collisions++;
               this.retire(this.cars[idA], false);
               this.retire(this.cars[idB], false);
@@ -482,6 +596,7 @@ export class World {
     this.spawnAccum = 0;
     this.free.length = 0;
     this.cars.length = 0;
+    this.spawnByEntry.clear();
     for (const lane of this.net.lanes) lane.cars.length = 0;
 
     // Programs, offsets and groups survive a retry — losing the plan you just
@@ -495,7 +610,10 @@ export class World {
   // ---------------------------------------------------------------- spawning
 
   private spawn(dt: number): void {
-    this.spawnAccum += this.demand * dt;
+    // Rush multiplies the base rate, so the sandbox demand slider still works.
+    // Warmup fills the map at the profile's opening level.
+    this.spawnAccum +=
+      this.demand * this.rushMult(this.warming ? 0 : this.stats.elapsed) * dt;
 
     while (this.spawnAccum >= 1) {
       this.spawnAccum -= 1;
@@ -503,13 +621,16 @@ export class World {
       // Try a few random entries; drop the arrival if they're all backed up.
       let placed = false;
       for (let attempt = 0; attempt < 10 && !placed; attempt++) {
-        const entry = this.entries[Math.floor(this.rand() * this.entries.length)];
+        const entry = this.pickWeighted(this.entries, (e) => e.weight);
         if (!entry) break;
 
-        // Send it somewhere other than where it came from.
-        const dests = this.routing.destinations.filter((d) => d !== entry.node);
-        if (dests.length === 0) continue;
-        const dest = dests[Math.floor(this.rand() * dests.length)];
+        // Send it somewhere other than where it came from, weighted by how
+        // strongly each destination attracts traffic.
+        const dest = this.pickWeighted(
+          this.routing.destinations,
+          (d, i) => (d === entry.node ? 0 : this.attractWeights[i]),
+        );
+        if (dest === null) continue;
         const cost = this.routing.cost.get(dest);
         if (!cost) continue;
 
@@ -543,9 +664,23 @@ export class World {
         if (!route) continue;
 
         this.create(route, this.routing.destinations.indexOf(dest));
+        this.spawnByEntry.set(entry.node, (this.spawnByEntry.get(entry.node) ?? 0) + 1);
         placed = true;
       }
     }
+  }
+
+  /** Weighted random pick; null when every weight is zero. */
+  private pickWeighted<T>(items: T[], weightOf: (item: T, index: number) => number): T | null {
+    let total = 0;
+    for (let i = 0; i < items.length; i++) total += weightOf(items[i], i);
+    if (total <= 0) return null;
+    let roll = this.rand() * total;
+    for (let i = 0; i < items.length; i++) {
+      roll -= weightOf(items[i], i);
+      if (roll <= 0) return items[i];
+    }
+    return items[items.length - 1];
   }
 
   private create(route: LaneId[], district: number): void {
@@ -571,6 +706,7 @@ export class World {
 
     this.net.lanes[laneId].cars.push(car.id);
     this.stats.active++;
+    this.stats.spawned++;
   }
 
   /**
@@ -592,6 +728,8 @@ export class World {
       this.stats.delivered++;
       this.waitTotal += car.waited;
       this.stats.meanWait = this.waitTotal / this.stats.delivered;
+    } else {
+      this.stats.retired++;
     }
   }
 
@@ -618,7 +756,12 @@ export class World {
         const car = this.cars[lane.cars[i]];
         car.v = Math.max(0, car.v + accel[car.id] * dt);
         car.s += car.v * dt;
-        if (car.v < 0.15) car.waited += dt;
+        if (car.v < 0.15) {
+          car.waited += dt;
+          // Counted here rather than on delivery so cars still stuck in a jam
+          // contribute to the score — they are the ones that matter most.
+          this.stats.delayHours += dt / 3600;
+        }
       }
     }
 
@@ -662,7 +805,34 @@ export class World {
     // able to strand somebody in the box.
     if (lane.stopS >= 0 && car.s <= lane.stopS) {
       const junction = lane.junction ? this.junctions.get(lane.junction) : undefined;
-      if (junction && nextId !== undefined && !junction.green.has(nextId)) {
+      /*
+       * Two separate reasons to hold at the line, and they read the same to the
+       * car following behind: the movement is not green, or it is green but the
+       * driver has to give way. A permissive left turn on a green ball is the
+       * second case — it may go, but only into a gap.
+       */
+      let stopped = false;
+      if (junction !== undefined && nextId !== undefined) {
+        if (!junction.green.has(nextId)) {
+          stopped = true;
+        } else if (this.yieldBlockedAt(nextId, junction) !== null) {
+          /*
+           * Green, but the gap is not there yet. A driver does not sit behind
+           * the line for this — they pull into the junction and wait alongside
+           * the oncoming traffic, and turn when it stops or a gap opens. That
+           * matters enormously: waiting at the line blocks the whole approach
+           * behind them for the entire green, and on a one-lane street with a
+           * steady opposing flow the left turn is never served at all, so the
+           * queue grows without limit and the street gridlocks.
+           *
+           * One car at a time. The second waits at the line, exactly as it
+           * would in life, because there is only room in the box for one.
+           */
+          stopped = this.net.lanes[nextId].cars.length > 0;
+        }
+      }
+
+      if (stopped) {
         const stopGap = lane.stopS - car.s;
         if (stopGap < gap) {
           gap = stopGap;
@@ -671,7 +841,113 @@ export class World {
       }
     }
 
+    /*
+     * A give-way movement keeps looking after it has committed.
+     *
+     * Deciding only at the stop line is not enough: the gap a driver accepted
+     * can close while the turn is being made, and with nothing watching for
+     * that, left turners drove into the side of oncoming traffic — which is
+     * exactly what the validator caught. So a car partway through the turn
+     * carries a virtual stationary leader at the point where the two paths
+     * meet, and holds short of it rather than crossing.
+     *
+     * This also gives the behaviour that makes a permissive left work at all:
+     * when the phase ends, the oncoming movement is no longer green, the block
+     * lifts, and whoever is waiting in the box completes the turn on the amber.
+     */
+    if (lane.kind === "connector" && lane.from !== null) {
+      const owner = this.net.lanes[lane.from].junction;
+      const junction = owner !== null ? this.junctions.get(owner) : undefined;
+      if (junction) {
+        const blockAt = this.yieldBlockedAt(lane.id, junction, car.s);
+        if (blockAt !== null) {
+          const stopGap = blockAt - CONFLICT_RADIUS - car.s;
+          if (stopGap < gap) {
+            gap = stopGap;
+            leaderV = 0;
+          }
+        }
+      }
+    }
+
     return idmAccel(car.v, gap, leaderV, v0);
+  }
+
+  /**
+   * Whether a give-way movement may go.
+   *
+   * A permissive left turn has a green ball, not a green arrow: it is allowed
+   * into the junction, but only once the traffic coming the other way leaves a
+   * gap big enough to turn across. This is the rule that makes a two-phase
+   * signal work at all, and it is also where a lot of real delay comes from —
+   * on a single-lane approach the through traffic queued behind a waiting left
+   * turner is stuck too, which is precisely why turn bays exist.
+   *
+   * Movements with nothing to give way to return true immediately, so the
+   * ordinary case costs one failed map lookup.
+   */
+  private yieldBlockedAt(
+    connectorId: LaneId,
+    junction: Junction,
+    from = 0,
+  ): number | null {
+    const targets = this.priority.yieldTo.get(connectorId);
+    if (targets === undefined) return null;
+
+    let earliest: number | null = null;
+
+    for (const target of targets) {
+      /*
+       * A point already behind the car is settled — it is across, and the only
+       * thing left to do is finish. Without this a car that has just cleared a
+       * crossing keeps treating it as a blocker, brakes for a point it is
+       * standing on, and stops in the middle of the conflict rather than
+       * driving out of it. That was the remaining source of collisions.
+       */
+      if (target.sSelf <= from + CONFLICT_RADIUS) continue;
+
+      // Traffic that is itself held at a red is no reason to wait.
+      if (!junction.green.has(target.connector)) continue;
+
+      let blocked = false;
+
+      // Anyone already in the box on that movement and not yet past the point
+      // where the two paths meet.
+      const crossing = this.net.lanes[target.connector];
+      for (const carId of crossing.cars) {
+        if (this.cars[carId].s <= target.sAt + CAR_LENGTH) {
+          blocked = true;
+          break;
+        }
+      }
+
+      /*
+       * Anyone approaching who would arrive before the turn is complete. Only
+       * the front car on the feeding lane can matter — the rest are behind it —
+       * so this stays O(1) however long the queue is.
+       *
+       * Arrival is estimated at close to free-flow speed rather than at the
+       * car's current speed. A car stopped at the head of its own queue is
+       * doing 0 and looks like it will never arrive, when in fact it is about
+       * to launch; taking its present speed at face value is what put cars into
+       * the side of oncoming traffic.
+       */
+      if (!blocked && target.feeder !== null) {
+        const feeder = this.net.lanes[target.feeder];
+        const leadId = feeder.cars[0];
+        if (leadId !== undefined) {
+          const lead = this.cars[leadId];
+          const distance = feeder.length - lead.s + target.sAt;
+          const approach = distance / Math.max(lead.v, IDM.v0 * 0.75);
+          if (approach < CRITICAL_GAP) blocked = true;
+        }
+      }
+
+      if (!blocked) continue;
+      if (earliest === null || target.sSelf < earliest) earliest = target.sSelf;
+    }
+
+    return earliest;
   }
 
   private speedOf(laneId: LaneId): number {

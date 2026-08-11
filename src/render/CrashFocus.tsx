@@ -19,18 +19,30 @@ const easeOut = (t: number) => 1 - Math.pow(1 - t, 3);
  */
 export function CrashFocus({ world }: { world: World }) {
   const controls = useThree((s) => s.controls) as OrbitControlsImpl | null;
-  const camera = useThree((s) => s.camera) as THREE.OrthographicCamera;
+  const camera = useThree((s) => s.camera);
 
   const ring = useRef<THREE.Mesh>(null);
   const progress = useRef(0);
   const pulse = useRef(0);
+  /** Zoom under ortho; distance to the target under perspective. */
   const baseZoom = useRef<number | null>(null);
 
   const target = useMemo(() => new THREE.Vector3(), []);
+  const offset = useMemo(() => new THREE.Vector3(), []);
   const ringGeom = useMemo(
     () => new THREE.RingGeometry(0.78, 1, 48).rotateX(-Math.PI / 2),
     [],
   );
+
+  /**
+   * Set the perspective camera's distance from the pivot without turning it.
+   * The push-in is a dolly there, since a perspective camera has no zoom.
+   */
+  const pullBack = (distance: number) => {
+    if (!controls) return;
+    offset.subVectors(camera.position, controls.target).setLength(distance);
+    camera.position.copy(controls.target).add(offset);
+  };
 
   useFrame((_, delta) => {
     const crash = world.crash;
@@ -39,8 +51,12 @@ export function CrashFocus({ world }: { world: World }) {
     if (!crash) {
       // Hand the camera back on restart, exactly as we found it.
       if (baseZoom.current !== null) {
-        camera.zoom = baseZoom.current;
-        camera.updateProjectionMatrix();
+        if (camera instanceof THREE.OrthographicCamera) {
+          camera.zoom = baseZoom.current;
+          camera.updateProjectionMatrix();
+        } else if (controls) {
+          pullBack(baseZoom.current);
+        }
         baseZoom.current = null;
       }
       if (controls) controls.enabled = true;
@@ -50,7 +66,14 @@ export function CrashFocus({ world }: { world: World }) {
       return;
     }
 
-    if (baseZoom.current === null) baseZoom.current = camera.zoom;
+    if (baseZoom.current === null) {
+      baseZoom.current =
+        camera instanceof THREE.OrthographicCamera
+          ? camera.zoom
+          : controls
+            ? camera.position.distanceTo(controls.target)
+            : camera.position.length();
+    }
 
     progress.current = Math.min(1, progress.current + delta / PUSH_TIME);
     const eased = easeOut(progress.current);
@@ -63,12 +86,23 @@ export function CrashFocus({ world }: { world: World }) {
       controls.update();
     }
 
-    camera.zoom = THREE.MathUtils.lerp(
-      baseZoom.current,
-      baseZoom.current * PUSH_ZOOM,
-      eased,
-    );
-    camera.updateProjectionMatrix();
+    if (camera instanceof THREE.OrthographicCamera) {
+      camera.zoom = THREE.MathUtils.lerp(
+        baseZoom.current,
+        baseZoom.current * PUSH_ZOOM,
+        eased,
+      );
+      camera.updateProjectionMatrix();
+    } else {
+      // Same push, expressed as ground covered rather than magnification.
+      pullBack(
+        THREE.MathUtils.lerp(
+          baseZoom.current,
+          baseZoom.current / PUSH_ZOOM,
+          eased,
+        ),
+      );
+    }
 
     if (mesh) {
       pulse.current = (pulse.current + delta / PULSE) % 1;

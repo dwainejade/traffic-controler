@@ -76,6 +76,22 @@ export function buildingGeometry(bevel = 0.04): THREE.BufferGeometry {
   return g
 }
 
+/**
+ * Flat ground-plane geometry from a world-space [x, z] polygon loop. The shape
+ * is built in XY and laid flat with rotateX(-90°), which maps shape (x, y) to
+ * world (x, -y) — hence the negated z. Mesh position should be [0, y, 0]; the
+ * vertices already carry the world offsets.
+ */
+export function flatPolygon(points: [number, number][]): THREE.BufferGeometry {
+  const s = new THREE.Shape()
+  s.moveTo(points[0][0], -points[0][1])
+  for (let i = 1; i < points.length; i++) s.lineTo(points[i][0], -points[i][1])
+  s.closePath()
+  const g = new THREE.ShapeGeometry(s)
+  g.rotateX(-Math.PI / 2)
+  return g
+}
+
 /** Rect overlap test used to keep scatter out of road corridors and other blocks. */
 export function rectsOverlap(
   ax: number, az: number, ahx: number, ahz: number,

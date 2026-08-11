@@ -6,6 +6,7 @@ import {
   type Timing,
 } from "./junction";
 import { IDM } from "./idm";
+import { polyLength, roadCentreline } from "./centreline";
 import type { Network } from "./network";
 import type { LevelDef, NodeId } from "./types";
 
@@ -108,19 +109,18 @@ export function autoOffsets(
   if (group.members.length === 0) return;
 
   const cycle = cycleOf(group.parent, timing);
-  const posOf = (id: NodeId) => {
-    const node = level.nodes.find((n) => n.id === id);
-    return node ? node.pos : null;
-  };
 
-  // Adjacency between group members that share a road.
-  const neighbours = new Map<NodeId, NodeId[]>();
+  // Adjacency between group members that share a road, with the *driven*
+  // distance between them. On a curved road the chord understates travel time
+  // and the wave arrives before the platoon does.
+  const neighbours = new Map<NodeId, { id: NodeId; dist: number }[]>();
   for (const id of group.members) neighbours.set(id, []);
   for (const road of level.roads) {
     const { from, to } = road;
     if (!neighbours.has(from) || !neighbours.has(to)) continue;
-    neighbours.get(from)!.push(to);
-    neighbours.get(to)!.push(from);
+    const dist = polyLength(roadCentreline(level, road));
+    neighbours.get(from)!.push({ id: to, dist });
+    neighbours.get(to)!.push({ id: from, dist });
   }
 
   const root = group.members[0];
@@ -129,16 +129,10 @@ export function autoOffsets(
 
   for (let head = 0; head < queue.length; head++) {
     const current = queue[head];
-    const here = posOf(current);
-    if (!here) continue;
-
     for (const next of neighbours.get(current) ?? []) {
-      if (distance.has(next)) continue;
-      const there = posOf(next);
-      if (!there) continue;
-      const step = Math.hypot(there[0] - here[0], there[1] - here[1]);
-      distance.set(next, distance.get(current)! + step);
-      queue.push(next);
+      if (distance.has(next.id)) continue;
+      distance.set(next.id, distance.get(current)! + next.dist);
+      queue.push(next.id);
     }
   }
 

@@ -180,20 +180,117 @@ export function buildConflicts(net: Network): ConflictMap {
 }
 
 /**
- * A phase is legal exactly when no two of its movements cross. This is the one
- * rule behind the phase editor, the tutorial and the crash system.
+ * A phase is legal exactly when no two of its movements *hard*-conflict.
+ * Crossings a driver can yield out of — a permissive left against oncoming —
+ * are legal in one phase and are resolved on the road instead.
  */
 export function illegalPairsInPhase(
-  conflicts: ConflictMap,
+  priority: Priority,
   connectors: LaneId[],
 ): [LaneId, LaneId][] {
   const bad: [LaneId, LaneId][] = [];
   for (let i = 0; i < connectors.length; i++) {
     for (let k = i + 1; k < connectors.length; k++) {
-      if (conflicts.pairs.has(pairKey(connectors[i], connectors[k]))) {
+      if (priority.hard.has(pairKey(connectors[i], connectors[k]))) {
         bad.push([connectors[i], connectors[k]]);
       }
     }
   }
   return bad;
+}
+
+// ------------------------------------------------------------------ priority
+
+/**
+ * Who gives way to whom inside the box.
+ *
+ * Two movements crossing does not, on its own, mean they cannot run together.
+ * On a New York green ball, an approach gets *all* of its movements at once —
+ * straight, left and right — and the left turn crosses oncoming traffic and
+ * yields to it. That is how a normal signal works, and it is why a standard
+ * crossroads runs two phases rather than four: north and south together, then
+ * east and west.
+ *
+ * So each crossing pair is one of three things:
+ *
+ *   - **soft** — a permissive left against oncoming traffic. Legal together;
+ *     the left turn waits for a gap.
+ *   - **none** — two opposing left turns. They pass each other driver's side to
+ *     driver's side and never actually meet, but on a tight radius their
+ *     modelled paths come within the clearance and register as a conflict.
+ *   - **hard** — anything else. These genuinely cannot be green together.
+ */
+export type YieldTarget = {
+  /** The movement to give way to. */
+  connector: LaneId;
+  /** Where along that movement the two paths meet. */
+  sAt: number;
+  /** Where along *this* movement they meet — how far a waiting car may creep. */
+  sSelf: number;
+  /** The road lane feeding it, so approaching traffic counts too. */
+  feeder: LaneId | null;
+};
+
+export type Priority = {
+  /** Pairs that may never be green together. A subset of `ConflictMap.pairs`. */
+  hard: Set<string>;
+  /** Per connector, the movements it must give way to. */
+  yieldTo: Map<LaneId, YieldTarget[]>;
+};
+
+/** Arms this far from head-on count as opposing. cos(126°). */
+const OPPOSING = -0.59;
+
+export function buildPriority(net: Network, conflicts: ConflictMap): Priority {
+  const hard = new Set<string>();
+  const yieldTo = new Map<LaneId, YieldTarget[]>();
+
+  // Outward direction of the arm each connector leaves from, so "oncoming" can
+  // be decided by geometry rather than by compass names.
+  const armOut = new Map<LaneId, { x: number; z: number }>();
+  for (const [junctionId, arms] of net.armsByJunction) {
+    void junctionId;
+    for (const arm of arms) {
+      for (const id of arm.connectorIds) armOut.set(id, arm.out);
+    }
+  }
+
+  const add = (from: LaneId, target: YieldTarget) => {
+    const list = yieldTo.get(from) ?? [];
+    list.push(target);
+    yieldTo.set(from, list);
+  };
+
+  for (const points of conflicts.byJunction.values()) {
+    for (const point of points) {
+      const a = net.lanes[point.a];
+      const b = net.lanes[point.b];
+      const outA = armOut.get(a.id);
+      const outB = armOut.get(b.id);
+
+      const opposing =
+        outA !== undefined &&
+        outB !== undefined &&
+        outA.x * outB.x + outA.z * outB.z < OPPOSING;
+
+      const leftA = a.turn === "left";
+      const leftB = b.turn === "left";
+
+      if (opposing && leftA && leftB) continue; // they pass; nothing to resolve
+
+      if (opposing && leftA !== leftB) {
+        // The left turn waits; the movement coming the other way does not.
+        if (leftA) {
+          add(a.id, { connector: b.id, sAt: point.sB, sSelf: point.sA, feeder: b.from });
+        } else {
+          add(b.id, { connector: a.id, sAt: point.sA, sSelf: point.sB, feeder: a.from });
+        }
+        continue;
+      }
+
+      hard.add(pairKey(a.id, b.id));
+    }
+  }
+
+  return { hard, yieldTo };
 }
