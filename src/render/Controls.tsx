@@ -107,7 +107,11 @@ export function Controls({ level }: { level: LevelDef }) {
       const anchored = groundUnderPointer(x, y, before) !== null;
 
       if (camera instanceof THREE.OrthographicCamera) {
-        const next = THREE.MathUtils.clamp(camera.zoom * scale, zoomMin, zoomMax);
+        const next = THREE.MathUtils.clamp(
+          camera.zoom * scale,
+          zoomMin,
+          zoomMax,
+        );
         if (next === camera.zoom) return;
         camera.zoom = next;
         camera.updateProjectionMatrix();
@@ -242,7 +246,8 @@ export function Controls({ level }: { level: LevelDef }) {
     };
 
     const down = (e: KeyboardEvent) => {
-      if (!interesting(e) || e.metaKey || e.ctrlKey || e.altKey || typing()) return;
+      if (!interesting(e) || e.metaKey || e.ctrlKey || e.altKey || typing())
+        return;
       keys.current.add(e.key.toLowerCase());
     };
     const up = (e: KeyboardEvent) => keys.current.delete(e.key.toLowerCase());
@@ -386,7 +391,7 @@ export function Controls({ level }: { level: LevelDef }) {
       // Below ~18° the view flattens to a plan and the buildings stop reading;
       // above ~68° you start looking through the model edge-on.
       minPolarAngle={THREE.MathUtils.degToRad(0)}
-      maxPolarAngle={THREE.MathUtils.degToRad(82)}
+      maxPolarAngle={THREE.MathUtils.degToRad(88)}
       /*
        * Zoom limits scale with the map. A fixed floor of 1 is fine for a single
        * junction but on a city it is already tighter than the view that shows
