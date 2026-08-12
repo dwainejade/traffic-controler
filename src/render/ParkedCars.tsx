@@ -33,6 +33,32 @@ const MAX_PARKED = 3000;
 const YAW_JITTER = 0.035;
 const ALONG_JITTER = 0.35;
 
+/**
+ * Pick a vehicle colour according to its configured weight.
+ *
+ * The seed is in [0, 1), so the result is deterministic for a given slot while
+ * still respecting the relative weights in VEHICLE_COLORS.
+ */
+const totalColourWeight = VEHICLE_COLORS.reduce(
+  (sum, colour) => sum + colour.weight,
+  0,
+);
+
+const pickColour = (seed: number) => {
+  let target = seed * totalColourWeight;
+
+  for (const colour of VEHICLE_COLORS) {
+    target -= colour.weight;
+
+    if (target < 0) {
+      return colour;
+    }
+  }
+
+  // Protect against floating-point edge cases.
+  return VEHICLE_COLORS[VEHICLE_COLORS.length - 1];
+};
+
 export function ParkedCars({ world }: { world: World }) {
   const bodies = useRef<THREE.InstancedMesh>(null);
   const shadows = useRef<THREE.InstancedMesh>(null);
@@ -43,10 +69,10 @@ export function ParkedCars({ world }: { world: World }) {
   const { slots } = world.parking;
 
   /*
-   * Occupancy changes, so the transforms cannot simply be written once — but
-   * they change on the order of once a second, not once a frame. `revision` is
-   * bumped by the world whenever a bay changes hands, and this rewrites only
-   * then.
+   * Occupancy changes, so the transforms cannot simply be written once —
+   * but they change on the order of once a second, not once a frame.
+   * `revision` is bumped by the world whenever a bay changes hands,
+   * and this rewrites only then.
    */
   const written = useRef(-1);
 
@@ -64,20 +90,32 @@ export function ParkedCars({ world }: { world: World }) {
 
     const spec = VEHICLE.car;
     const scale = new THREE.Vector3(spec.width, spec.height, spec.length);
-    const shadowScale = new THREE.Vector3(spec.width * 2.1, 1, spec.length * 1.5);
+    const shadowScale = new THREE.Vector3(
+      spec.width * 2.1,
+      1,
+      spec.length * 1.5,
+    );
 
     let n = 0;
+
     for (const slot of slots) {
       if (slot.occupant === null || n >= MAX_PARKED) continue;
 
       // Jitter is derived from the slot id, not sampled, so a bay looks the
       // same every time it is filled rather than twitching on each rewrite.
       const wobble = ((slot.id * 2654435761) >>> 0) / 4294967296;
+
       const angle = slot.angle + (wobble - 0.5) * 2 * YAW_JITTER;
+
       const nudge = (wobble - 0.5) * 2 * ALONG_JITTER;
 
       q.setFromAxisAngle(up, angle);
-      pos.set(slot.x + Math.sin(angle) * nudge, 0, slot.z + Math.cos(angle) * nudge);
+
+      pos.set(
+        slot.x + Math.sin(angle) * nudge,
+        0,
+        slot.z + Math.cos(angle) * nudge,
+      );
 
       m.compose(pos, q, scale);
       body.setMatrixAt(n, m);
@@ -86,16 +124,33 @@ export function ParkedCars({ world }: { world: World }) {
       sm.compose(pos, q, shadowScale);
       shadow.setMatrixAt(n, sm);
 
-      colour.set(VEHICLE_COLORS[slot.colour % VEHICLE_COLORS.length].hex);
+      /*
+       * Pick colour deterministically from the slot id, but use the colour's
+       * configured weight rather than treating every colour equally.
+       *
+       * A separate hash from `wobble` avoids coupling the colour distribution
+       * to the parking-position jitter.
+       */
+      const colourWobble =
+        ((slot.id * 2246822519 + 3266489917) >>> 0) / 4294967296;
+
+      const vehicleColour = pickColour(colourWobble);
+
+      colour.set(vehicleColour.hex);
       body.setColorAt(n, colour);
+
       n++;
     }
 
     body.count = n;
     shadow.count = n;
+
     body.instanceMatrix.needsUpdate = true;
     shadow.instanceMatrix.needsUpdate = true;
-    if (body.instanceColor) body.instanceColor.needsUpdate = true;
+
+    if (body.instanceColor) {
+      body.instanceColor.needsUpdate = true;
+    }
   };
 
   useLayoutEffect(() => {
@@ -111,8 +166,10 @@ export function ParkedCars({ world }: { world: World }) {
     // The fake contact blobs fade out with the sun, exactly as the moving
     // traffic's do — a hard shadow under a car at midnight is the tell.
     const shadow = shadows.current;
+
     if (shadow) {
-      (shadow.material as THREE.MeshBasicMaterial).opacity = 1 - SKY.night * 0.85;
+      (shadow.material as THREE.MeshBasicMaterial).opacity =
+        1 - SKY.night * 0.85;
     }
   });
 
@@ -121,7 +178,12 @@ export function ParkedCars({ world }: { world: World }) {
       <instancedMesh ref={shadows} args={[UNIT_PLANE, undefined, MAX_PARKED]}>
         <meshBasicMaterial map={blob} transparent depthWrite={false} />
       </instancedMesh>
-      <instancedMesh ref={bodies} args={[geom, undefined, MAX_PARKED]} castShadow>
+
+      <instancedMesh
+        ref={bodies}
+        args={[geom, undefined, MAX_PARKED]}
+        castShadow
+      >
         <meshLambertMaterial vertexColors />
       </instancedMesh>
     </group>
