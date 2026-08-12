@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import type { LevelDef } from "../sim/types";
@@ -79,10 +79,12 @@ export function CinematicCamera({ level }: { level: LevelDef }) {
   const path = useRef<Path>(pickPath(level.half));
   const t = useRef(0);
   const lookTarget = useRef(new THREE.Vector3());
+  const getRandomHeight = () => Math.random() * (25 - -60) + -60;
+  const [randomHeight, setCameraLookTargetHeight] = useState(getRandomHeight());
 
   // A fresh flight whenever the level changes underneath it.
   useEffect(() => {
-    path.current = pickPath(level.half);
+    path.current = pickPath(level.half * 0.5);
     t.current = 0;
   }, [level]);
 
@@ -98,6 +100,8 @@ export function CinematicCamera({ level }: { level: LevelDef }) {
       } else if (k === "w" || k === "a" || k === "s" || k === "d") {
         cancel();
       }
+      // get random height for the look target, so the camera doesn't always look at the same height
+      setCameraLookTargetHeight(getRandomHeight());
     };
 
     const el = gl.domElement;
@@ -127,7 +131,7 @@ export function CinematicCamera({ level }: { level: LevelDef }) {
 
     lookTarget.current.set(
       x + p.dir.x * p.lookAhead,
-      0,
+      randomHeight,
       z + p.dir.z * p.lookAhead,
     );
     camera.lookAt(lookTarget.current);
