@@ -13,6 +13,7 @@ import {
   truckBodyGeometry,
 } from "./vehicleArt";
 import { LAYER } from "./layers";
+import { useGlow } from "./glow";
 import { publishHud, useHud } from "../ui/hudStore";
 
 /** Simulation runs at a fixed 60 Hz of simulated time, whatever the render rate. */
@@ -96,6 +97,15 @@ export function Simulation({ world }: { world: World }) {
   const heads = useRef<THREE.InstancedMesh>(null);
   const tails = useRef<THREE.InstancedMesh>(null);
   const beams = useRef<THREE.InstancedMesh>(null);
+
+  /*
+   * Lamps and indicators bloom; the pool a car throws on the road ahead of it
+   * does not. That pool is a soft gradient already, and blooming it turns every
+   * car into a comet.
+   */
+  useGlow(heads);
+  useGlow(tails);
+  useGlow(blinkers);
 
   const accumulator = useRef(0);
   const hudTimer = useRef(0);

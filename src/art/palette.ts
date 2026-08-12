@@ -24,6 +24,13 @@ export const PALETTE = {
   marking: '#FFFFFF',
 
   /**
+   * The kerb a median stands on. Sidewalk tone rather than road tone: a median
+   * is a piece of the footway left in the middle of the street, and reading it
+   * as pavement is what tells you at a glance that it is raised and not paint.
+   */
+  medianKerb: '#DCD8D1',
+
+  /**
    * Bus lane paint. The second saturated thing allowed into the environment,
    * and it earns the exemption the same way it does in life: a bus lane is only
    * useful if you can see at a glance that it is not for you. Kept dusty rather
@@ -42,6 +49,14 @@ export const PALETTE = {
   water: '#A8CDE0',
   /** A touch deeper, for the strip right against the shore. */
   waterDeep: '#93BDD4',
+
+  /**
+   * Street name signs at the corners. Kept inside the environment's saturation
+   * ceiling: a real blade is a strong green, and four of them at every junction
+   * in that green would put more saturated area on the map than the traffic.
+   */
+  signBlade: '#3E5B4C',
+  signPost: '#7C8288',
 
   /** Park fill. Accent only — never base terrain. */
   park: '#93C97E',

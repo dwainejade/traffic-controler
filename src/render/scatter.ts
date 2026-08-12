@@ -1,6 +1,10 @@
 import { polyLength, roadCentreline, samplePoly } from '../sim/centreline'
 import { junctionSize, pavedWidth, roadEdges, type LevelDef } from '../sim/types'
 import { mulberry32 } from './geometry'
+import { MEDIAN_HEIGHT } from './Medians'
+
+/** Metres between median trees. A planted mall, not a hedge. */
+const MEDIAN_TREE_SPACING = 8
 
 export type BuildingInst = {
   x: number
@@ -15,6 +19,8 @@ export type BuildingInst = {
 export type TreeInst = {
   x: number
   z: number
+  /** Ground height the trunk stands on. Only a median raises it; absent means 0. */
+  y?: number
   scale: number
   rot: number
   dark: boolean
@@ -315,6 +321,53 @@ export function scatterLevel(level: LevelDef): {
         scale: 1.9 + rand() * 1.6,
         rot: rand() * Math.PI * 2,
         dark: rand() < 0.4,
+      })
+    }
+  }
+
+  /*
+   * --- Street trees down the medians.
+   *
+   * Deliberately not the park scatter. A median is a planted strip a couple of
+   * metres wide, and the park density on one gives a hedge running down the
+   * middle of the avenue; what is actually there is a row of trees with room
+   * between them, so the spacing is enforced rather than left to chance.
+   *
+   * The road-clearance test is skipped for the same reason it exists: a median
+   * sits inside the carriageway by definition, so `isClear` would reject every
+   * candidate. The planter's own kerb is the clearance.
+   */
+  for (const zone of level.zones) {
+    if (zone.kind !== 'median' || !zone.polygon) continue
+    const poly = zone.polygon
+    const [cx, cz] = zone.centre
+    const [hx, hz] = zone.half
+
+    // Well inside the kerb, so a trunk never overhangs the traffic.
+    const margin = 1.4
+    const inside = (x: number, z: number) =>
+      pointInPolygon(x, z, poly) &&
+      pointInPolygon(x + margin, z, poly) &&
+      pointInPolygon(x - margin, z, poly) &&
+      pointInPolygon(x, z + margin, poly) &&
+      pointInPolygon(x, z - margin, poly)
+
+    const count = Math.min(24, Math.round(polygonArea(poly) / 30))
+    const placed: [number, number][] = []
+    for (let i = 0; i < count * 12 && placed.length < count; i++) {
+      const x = cx + (rand() * 2 - 1) * hx
+      const z = cz + (rand() * 2 - 1) * hz
+      if (!inside(x, z)) continue
+      if (placed.some(([px, pz]) => Math.hypot(px - x, pz - z) < MEDIAN_TREE_SPACING)) continue
+      placed.push([x, z])
+      trees.push({
+        x,
+        z,
+        y: MEDIAN_HEIGHT,
+        // Smaller than a park tree: this is a street tree in a planter.
+        scale: 1.6 + rand() * 0.7,
+        rot: rand() * Math.PI * 2,
+        dark: rand() < 0.35,
       })
     }
   }

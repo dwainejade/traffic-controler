@@ -12,6 +12,7 @@ import {
   LANE_WIDTH,
   MIN_JUNCTION_SIZE,
   PARKING_WIDTH,
+  pavedWidth,
   STOP_OFFSET,
 } from "../../sim/types";
 
@@ -461,10 +462,12 @@ function signedArea2(poly: P[]): number {
  */
 function buildingHeight(tags: Tags, id: number): number {
   const explicit = parseFloat(tags.height ?? tags["building:height"] ?? "");
-  if (Number.isFinite(explicit) && explicit > 1) return Math.min(explicit, 180);
+  if (Number.isFinite(explicit) && explicit > 1) return Math.min(explicit, MAX_HEIGHT);
 
   const levels = parseFloat(tags["building:levels"] ?? "");
-  if (Number.isFinite(levels) && levels >= 1) return levels * STOREY + 1.2;
+  if (Number.isFinite(levels) && levels >= 1) {
+    return Math.min(levels * STOREY + 1.2, MAX_HEIGHT);
+  }
 
   // Untagged, which is most of them. A Brooklyn street is rowhouses with the
   // occasional apartment block, so this leans low and varies a little rather
@@ -480,6 +483,16 @@ function buildingHeight(tags: Tags, id: number): number {
 
 /** Floor-to-floor, metres. */
 const STOREY = 3.2;
+
+/**
+ * Ceiling on a tagged height, metres.
+ *
+ * Only a sanity guard against a mistagged way (a `height` in feet, or a stray
+ * extra digit), not a stylistic cap: it sits above the tallest thing in the
+ * city, so real skyscrapers come through at their tagged height — the Empire
+ * State Building's roof at 381 m, One World Trade's at 541 m.
+ */
+const MAX_HEIGHT = 600;
 
 /**
  * Which green tone a way gets, or null if it is not green at all.
@@ -518,6 +531,256 @@ function pointInPoly(x: number, z: number, poly: P[]): boolean {
     }
   }
   return inside;
+}
+
+// -------------------------------------------------------------------- medians
+
+/**
+ * The strip down the middle of a dual carriageway.
+ *
+ * There is no tag to read here. OSM's canonical
+ * `area:highway=central_reservation` is not in the Overpass query and is barely
+ * mapped in New York anyway; what a median mall actually carries is
+ * `landuse=grass`, or a name and `leisure=park` — the same tags as a lawn. So a
+ * median is recognised by where it lies rather than by what it says: a long
+ * thin ring, running along a street, with carriageway down both of its sides.
+ *
+ * The flanking test is what separates a median from a verge, which is just as
+ * long, just as thin and just as green, and has road on one side only.
+ */
+const MEDIAN_MAX_WIDTH = 12;
+const MEDIAN_MIN_LENGTH = 12;
+const MEDIAN_MIN_ASPECT = 3;
+/** How far past the strip's own edge to look for the carriageway beside it. */
+const MEDIAN_FLANK_REACH = 4;
+/** Left of a junction box, a piece shorter than this is not worth keeping. */
+const MEDIAN_MIN_PIECE = 6;
+/** Room left around a junction box for the crossing that runs across it. */
+const MEDIAN_CROSSING_PAD = 3.5;
+
+/** A polygon seen as a strip: its long axis, and its extent along and across it. */
+type Strip = {
+  /** Unit vector along the long axis. */
+  dir: P;
+  /** Unit vector across it, `dir` turned a quarter turn. */
+  normal: P;
+  centre: P;
+  length: number;
+  width: number;
+};
+
+/**
+ * Minimum-width oriented bounding box, tried over every edge direction.
+ *
+ * Axis-aligned bounds say nothing useful about a median: the Flatbush Avenue
+ * Ext malls run at 60° to the world axes, so their bounding boxes are several
+ * times their area and read as square. The minimum-width box over the edge
+ * directions is the standard construction, and a surveyed ring has few enough
+ * edges that trying all of them costs nothing.
+ */
+function stripOf(poly: P[]): Strip | null {
+  let best: Strip | null = null;
+
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const edge = Math.hypot(b.x - a.x, b.z - a.z);
+    if (edge < 1e-6) continue;
+
+    const dir = { x: (b.x - a.x) / edge, z: (b.z - a.z) / edge };
+    const normal = { x: -dir.z, z: dir.x };
+
+    let minU = Infinity;
+    let maxU = -Infinity;
+    let minV = Infinity;
+    let maxV = -Infinity;
+    for (const p of poly) {
+      const u = p.x * dir.x + p.z * dir.z;
+      const v = p.x * normal.x + p.z * normal.z;
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+
+    const width = maxV - minV;
+    if (best && width >= best.width) continue;
+
+    const u = (minU + maxU) / 2;
+    const v = (minV + maxV) / 2;
+    best = {
+      dir,
+      normal,
+      centre: { x: dir.x * u + normal.x * v, z: dir.z * u + normal.z * v },
+      length: maxU - minU,
+      width,
+    };
+  }
+
+  return best;
+}
+
+/** A road as the carriageway it paves: one segment of its centreline, kerb to kerb. */
+type Corridor = {
+  a: P;
+  b: P;
+  /** Unit vector from a to b. */
+  dir: P;
+  /** Half the paved width. */
+  half: number;
+};
+
+function corridorsOf(roads: RoadDef[], pos: Map<NodeId, P>): Corridor[] {
+  const out: Corridor[] = [];
+  for (const road of roads) {
+    const from = pos.get(road.from);
+    const to = pos.get(road.to);
+    if (!from || !to) continue;
+
+    const line: P[] = [
+      from,
+      ...(road.waypoints ?? []).map(([x, z]) => ({ x, z })),
+      to,
+    ];
+    const half = pavedWidth(road) / 2;
+    for (let i = 1; i < line.length; i++) {
+      const a = line[i - 1];
+      const b = line[i];
+      const len = Math.hypot(b.x - a.x, b.z - a.z);
+      if (len < 1e-6) continue;
+      out.push({ a, b, dir: { x: (b.x - a.x) / len, z: (b.z - a.z) / len }, half });
+    }
+  }
+  return out;
+}
+
+function distToSegment(p: P, a: P, b: P): number {
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const len2 = dx * dx + dz * dz;
+  const t =
+    len2 === 0 ? 0 : Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2));
+  return Math.hypot(p.x - (a.x + dx * t), p.z - (a.z + dz * t));
+}
+
+/**
+ * Whether a point stands on a carriageway running the same way as `dir`.
+ *
+ * The parallel test matters: every median has a cross street somewhere along
+ * it, and without it the cross street's own corridor answers for both sides at
+ * once and every green sliver near a junction becomes a median.
+ */
+function onCarriageway(p: P, dir: P, corridors: Corridor[]): boolean {
+  for (const c of corridors) {
+    if (Math.abs(c.dir.x * dir.x + c.dir.z * dir.z) < 0.85) continue;
+    if (distToSegment(p, c.a, c.b) <= c.half + 1) return true;
+  }
+  return false;
+}
+
+function looksLikeMedian(strip: Strip, corridors: Corridor[]): boolean {
+  if (strip.width > MEDIAN_MAX_WIDTH) return false;
+  if (strip.length < MEDIAN_MIN_LENGTH) return false;
+  if (strip.length < strip.width * MEDIAN_MIN_ASPECT) return false;
+
+  const reach = strip.width / 2 + MEDIAN_FLANK_REACH;
+  const samples = 5;
+  let flanked = 0;
+
+  for (let i = 0; i < samples; i++) {
+    // Spread across the middle four fifths, so a strip that runs out past the
+    // end of the dual carriageway is judged on the length that matters.
+    const t = ((i + 0.5) / samples - 0.5) * strip.length;
+    const c = {
+      x: strip.centre.x + strip.dir.x * t,
+      z: strip.centre.z + strip.dir.z * t,
+    };
+    const left = { x: c.x + strip.normal.x * reach, z: c.z + strip.normal.z * reach };
+    const right = { x: c.x - strip.normal.x * reach, z: c.z - strip.normal.z * reach };
+    if (
+      onCarriageway(left, strip.dir, corridors) &&
+      onCarriageway(right, strip.dir, corridors)
+    ) {
+      flanked++;
+    }
+  }
+
+  return flanked >= 3;
+}
+
+/** Sutherland-Hodgman against one half-plane of the strip's long axis. */
+function clipPolyToAxis(poly: P[], dir: P, bound: number, keepBelow: boolean): P[] {
+  const value = (p: P) => p.x * dir.x + p.z * dir.z;
+  const inside = (p: P) => (keepBelow ? value(p) <= bound : value(p) >= bound);
+  const cross = (a: P, b: P): P => {
+    const t = (bound - value(a)) / (value(b) - value(a));
+    return { x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t };
+  };
+
+  const out: P[] = [];
+  for (let i = 0; i < poly.length; i++) {
+    const cur = poly[i];
+    const prev = poly[(i - 1 + poly.length) % poly.length];
+    if (inside(cur)) {
+      if (!inside(prev)) out.push(cross(prev, cur));
+      out.push(cur);
+    } else if (inside(prev)) {
+      out.push(cross(prev, cur));
+    }
+  }
+  return out;
+}
+
+/**
+ * Cut a median where the junctions cross it.
+ *
+ * A median mall runs the length of an avenue in OSM as one continuous ring,
+ * straight through every junction on the way — which is right as a description
+ * of the planting and wrong as a description of the street, where each block's
+ * worth of it stops short of the box and the crossing that runs over it. So the
+ * strip is cut into the pieces between the junctions, and each piece becomes a
+ * zone of its own.
+ */
+function splitMedian(
+  poly: P[],
+  strip: Strip,
+  junctions: { pos: P; half: number }[],
+): P[][] {
+  const along = (p: P) => p.x * strip.dir.x + p.z * strip.dir.z;
+  const across = (p: P) => p.x * strip.normal.x + p.z * strip.normal.z;
+
+  const us = poly.map(along);
+  const lo = Math.min(...us);
+  const hi = Math.max(...us);
+  const centreV = across(strip.centre);
+
+  // Junctions the strip actually passes through, as the span of it each one eats.
+  const cuts: [number, number][] = [];
+  for (const j of junctions) {
+    const reach = j.half + MEDIAN_CROSSING_PAD;
+    if (Math.abs(across(j.pos) - centreV) > reach + strip.width / 2) continue;
+    const u = along(j.pos);
+    if (u + reach <= lo || u - reach >= hi) continue;
+    cuts.push([u - reach, u + reach]);
+  }
+  cuts.sort((a, b) => a[0] - b[0]);
+
+  const pieces: P[][] = [];
+  let start = lo;
+  const emit = (from: number, to: number) => {
+    if (to - from < MEDIAN_MIN_PIECE) return;
+    let piece = clipPolyToAxis(poly, strip.dir, to, true);
+    if (piece.length >= 3) piece = clipPolyToAxis(piece, strip.dir, from, false);
+    if (piece.length >= 3) pieces.push(piece);
+  };
+
+  for (const [from, to] of cuts) {
+    emit(start, from);
+    start = Math.max(start, to);
+  }
+  emit(start, hi);
+
+  return pieces;
 }
 
 // -------------------------------------------------------------------- import
@@ -1181,8 +1444,47 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
 
   green.sort((a, b) => b.area - a.area);
 
+  /*
+   * What a median is measured against: the carriageways that would flank it,
+   * and the junction boxes that cut it. Both are built once — the strip test
+   * below runs over every green ring on the map.
+   */
+  const nodePos = new Map<NodeId, P>(
+    nodes.map((n) => [n.id, { x: n.pos[0], z: n.pos[1] }] as const),
+  );
+  const corridors = corridorsOf(roads, nodePos);
+  const junctionBoxes = nodes
+    .filter((n) => n.kind === "junction")
+    .map((n) => {
+      const widths = roads
+        .filter((r) => r.from === n.id || r.to === n.id)
+        .map(pavedWidth);
+      const size =
+        widths.length === 0
+          ? 0
+          : Math.max(Math.max(...widths) + JUNCTION_MARGIN, MIN_JUNCTION_SIZE);
+      return { pos: { x: n.pos[0], z: n.pos[1] }, half: size / 2 };
+    });
+
   const zones: ZoneDef[] = [];
   const keptGreen: Green[] = [];
+
+  const pushZone = (id: string, kind: ZoneDef["kind"], poly: P[]) => {
+    const xs = poly.map((p) => p.x);
+    const zs = poly.map((p) => p.z);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minZ = Math.min(...zs);
+    const maxZ = Math.max(...zs);
+    zones.push({
+      id,
+      kind,
+      centre: [(minX + maxX) / 2, (minZ + maxZ) / 2],
+      half: [(maxX - minX) / 2, (maxZ - minZ) / 2],
+      polygon: poly.map((p) => [p.x, p.z] as [number, number]),
+    });
+  };
+
   for (const g of green) {
     const cx = g.poly.reduce((s, p) => s + p.x, 0) / g.poly.length;
     const cz = g.poly.reduce((s, p) => s + p.z, 0) / g.poly.length;
@@ -1190,20 +1492,17 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     if (keptGreen.some((k) => pointInPoly(cx, cz, k.poly))) continue;
     keptGreen.push(g);
 
-    const xs = g.poly.map((p) => p.x);
-    const zs = g.poly.map((p) => p.z);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minZ = Math.min(...zs);
-    const maxZ = Math.max(...zs);
+    const strip = stripOf(g.poly);
+    if (strip && looksLikeMedian(strip, corridors)) {
+      const pieces = splitMedian(g.poly, strip, junctionBoxes);
+      pieces.forEach((piece, i) => pushZone(`median${g.id}-${i}`, "median", piece));
+      // Every piece cut away by a junction is meant to be gone. A median that
+      // is nothing but junction — a short stub between two close ones — leaves
+      // no pieces at all, and that is the right answer rather than a fallback.
+      continue;
+    }
 
-    zones.push({
-      id: `green${g.id}`,
-      kind: g.kind,
-      centre: [(minX + maxX) / 2, (minZ + maxZ) / 2],
-      half: [(maxX - minX) / 2, (maxZ - minZ) / 2],
-      polygon: g.poly.map((p) => [p.x, p.z] as [number, number]),
-    });
+    pushZone(`green${g.id}`, g.kind, g.poly);
   }
 
   return {

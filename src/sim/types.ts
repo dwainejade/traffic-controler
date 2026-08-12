@@ -144,8 +144,14 @@ export type ZoneDef = {
    * `park` is amenity green — mown, planted, walked in — and reads as an accent
    * with trees in it. `grass` is the leftover kind: verges, cemeteries, the
    * strip beside a school. Same family, a tone apart, and only parks get trees.
+   *
+   * `median` is the strip down the middle of a dual carriageway. OSM maps it as
+   * ordinary green — a `landuse=grass` or `leisure=park` ring like any other —
+   * but it is street furniture rather than landscape: it stands on a kerb above
+   * the road it divides, and drawing it flat on the card left a lawn painted
+   * across the carriageway. `Medians` raises it; nothing else should fill it.
    */
-  kind: 'park' | 'grass' | 'block'
+  kind: 'park' | 'grass' | 'block' | 'median'
   /** Axis-aligned rect: centre [x, z] plus half-extents [hx, hz]. */
   centre: [number, number]
   half: [number, number]
@@ -166,7 +172,16 @@ export type ZoneDef = {
  * green-vs-not tests through here rather than growing another comparison.
  */
 export function isGreenZone(zone: ZoneDef): boolean {
-  return zone.kind === 'park' || zone.kind === 'grass'
+  return zone.kind === 'park' || zone.kind === 'grass' || zone.kind === 'median'
+}
+
+/**
+ * A median is green, but it is not ground: it is raised on a kerb and drawn by
+ * `Medians` rather than painted onto the card with the parks. Anything that
+ * fills or scatters over flat green has to exclude it.
+ */
+export function isMedianZone(zone: ZoneDef): boolean {
+  return zone.kind === 'median'
 }
 
 /**

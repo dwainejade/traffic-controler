@@ -4,6 +4,7 @@ import * as THREE from "three";
 import {
   PINNED_HOUR,
   SKY,
+  dayOfSim,
   emptyDaylight,
   hourOfDay,
   sampleDaylight,
@@ -48,7 +49,13 @@ export function Daylight({ level, world }: { level: LevelDef; world: World }) {
   const shadowExtent = level.half * 1.35;
 
   useFrame(() => {
-    sampleDaylight(cycle ? hourOfDay(world.signalClock) : PINNED_HOUR, sample);
+    // With the cycle off the clock is pinned to midday, but the day still is
+    // today's — the weather is a property of the day, not of the hour.
+    sampleDaylight(
+      cycle ? hourOfDay(world.signalClock) : PINNED_HOUR,
+      sample,
+      dayOfSim(cycle ? world.signalClock : 0),
+    );
     // Publish before anything reads it — headlights sample this same frame.
     SKY.sunDir.copy(sample.sunDir);
     SKY.sun.copy(sample.sun);
@@ -93,7 +100,10 @@ export function Daylight({ level, world }: { level: LevelDef; world: World }) {
       : camera.position.length();
     const span = level.half * 0.5;
     fog.color.copy(sample.air);
-    fog.near = Math.max(0, distance - span);
+    // Thick air starts a little closer to the camera as well as ending sooner.
+    // Kept gentle: pulling the near plane in hard puts fog on the tile directly
+    // under the camera, which reads as a dirty lens rather than as distance.
+    fog.near = Math.max(0, distance - span * (1 + sample.haze * 0.45));
     // At haze 0 the far plane is pushed so far back that nothing reaches it.
     fog.far = distance + span * (1 + (1 - sample.haze) * 9);
     scene.fog = fog;

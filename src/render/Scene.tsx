@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
-import { DepthOfField, EffectComposer } from "@react-three/postprocessing";
+import {
+  DepthOfField,
+  EffectComposer,
+  SelectiveBloom,
+} from "@react-three/postprocessing";
 import type { DepthOfFieldEffect } from "postprocessing";
 import type { LevelDef } from "../sim/types";
 import { Daylight } from "./Daylight";
 import { Ground } from "./Ground";
 import { Parks } from "./Parks";
+import { Medians } from "./Medians";
 import { RoadNetwork } from "./RoadNetwork";
 import { Buildings } from "./Buildings";
 import { Footprints } from "./Footprints";
@@ -22,6 +27,9 @@ import { CrashFocus } from "./CrashFocus";
 import { JunctionPicker } from "./JunctionPicker";
 import { QueuePressure } from "./QueuePressure";
 import { StreetLabels } from "./StreetLabels";
+import { StreetSigns } from "./StreetSigns";
+import { StreetLights } from "./StreetLights";
+import { useGlowing } from "./glow";
 import { SignalHeads } from "./SignalHeads";
 import type { World } from "../sim/world";
 import { clearSelection, useHud } from "../ui/hudStore";
@@ -208,12 +216,40 @@ const BOKEH_SCALE_IN = 2;
  * `perspectiveDepthToViewZ` under the street-level one), so the same effect
  * works for both without a separate ortho-only technique.
  */
-function PostFX({ half }: { half: number }) {
+/**
+ * Bloom.
+ *
+ * Selective, and not by preference — see `glow.ts`. On a high-key palette a
+ * luminance threshold picks out the buildings long before it picks out a
+ * signal, so what glows is a property of the object instead: the lamps, lenses
+ * and indicators that register themselves as light sources.
+ *
+ * Kept restrained. The whole art direction is a physical model under soft
+ * light, and a model does not have a bloom — what it has is a few genuinely
+ * bright little things, which at this scale read better slightly blown than
+ * pin-sharp. The threshold stays low because the selection has already done
+ * the picking; it is only there to keep the unlit face of a lamp housing from
+ * contributing.
+ */
+const BLOOM_INTENSITY = 1.5;
+const BLOOM_THRESHOLD = 0.25;
+const BLOOM_SMOOTHING = 0.4;
+
+function PostFX({
+  half,
+  depthOfField,
+  bloom,
+}: {
+  half: number;
+  depthOfField: boolean;
+  bloom: boolean;
+}) {
   const controls = useThree(
     (s) => s.controls as unknown as { target: THREE.Vector3 } | null,
   );
   const camera = useThree((s) => s.camera);
   const dof = useRef<DepthOfFieldEffect>(null);
+  const glowing = useGlowing();
 
   const zoomMin = useMemo(() => minZoom(half), [half]);
   const distMax = useMemo(() => maxDistance(half), [half]);
@@ -248,23 +284,51 @@ function PostFX({ half }: { half: number }) {
 
   return (
     <EffectComposer multisampling={4}>
-      <DepthOfField
-        ref={dof}
-        target={[0, 0, 0]}
-        focusRange={FOCUS_RANGE_OUT}
-        bokehScale={BOKEH_SCALE_OUT}
-      />
+      {depthOfField ? (
+        <DepthOfField
+          ref={dof}
+          target={[0, 0, 0]}
+          focusRange={FOCUS_RANGE_OUT}
+          bokehScale={BOKEH_SCALE_OUT}
+        />
+      ) : (
+        <></>
+      )}
+      {/*
+        `lights` is empty on purpose. The effect wants them so that selected
+        objects are lit in its own pass, but every light source on this map is
+        an unlit `meshBasicMaterial` — a lamp lens is its own colour whatever
+        the sky is doing — so there is nothing for a light to contribute.
+      */}
+      {bloom ? (
+        <SelectiveBloom
+          selection={glowing}
+          lights={EMPTY_LIGHTS}
+          intensity={BLOOM_INTENSITY}
+          luminanceThreshold={BLOOM_THRESHOLD}
+          luminanceSmoothing={BLOOM_SMOOTHING}
+          mipmapBlur
+        />
+      ) : (
+        <></>
+      )}
     </EffectComposer>
   );
 }
 
+/** Stable empty array — a fresh one would re-run the effect's setup each frame. */
+const EMPTY_LIGHTS: THREE.Object3D[] = [];
+
 export function Scene({ level, world }: { level: LevelDef; world: World }) {
   const { buildings, trees } = useMemo(() => scatterLevel(level), [level]);
   const showLabels = useHud((s) => s.layers.labels);
+  const showStreetSigns = useHud((s) => s.layers.streetSigns);
+  const showStreetLights = useHud((s) => s.layers.streetLights);
   const showSignals = useHud((s) => s.layers.signals);
   const showParking = useHud((s) => s.layers.parking);
   const perspective = useHud((s) => s.layers.perspective);
   const depthOfField = useHud((s) => s.layers.depthOfField);
+  const bloom = useHud((s) => s.layers.bloom);
   const cinematic = useHud((s) => s.layers.cinematicCamera);
 
   /*
@@ -336,7 +400,11 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       <Ground level={level} />
       <Parks zones={level.zones} />
       <RoadNetwork level={level} />
+      {/* Over the road: a median stands on a kerb above the carriageway. */}
+      <Medians zones={level.zones} />
       {showLabels && <StreetLabels level={level} />}
+      {showStreetSigns && <StreetSigns level={level} />}
+      {showStreetLights && <StreetLights level={level} />}
       {/* Surveyed outlines where the level has them, scattered boxes otherwise. */}
       {level.footprints?.length ? (
         <Footprints items={level.footprints} />
@@ -351,7 +419,10 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       <Simulation world={world} />
       <JunctionPicker level={level} world={world} />
       <CrashFocus world={world} />
-      {depthOfField && <PostFX half={level.half} />}
+      {/* Nothing to composite if both effects are off — skip the whole pass. */}
+      {(depthOfField || bloom) && (
+        <PostFX half={level.half} depthOfField={depthOfField} bloom={bloom} />
+      )}
     </Canvas>
   );
 }

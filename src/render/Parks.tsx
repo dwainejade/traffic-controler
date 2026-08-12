@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import * as THREE from 'three'
 import { PALETTE } from '../art/palette'
-import { isGreenZone, type ZoneDef } from '../sim/types'
+import { isGreenZone, isMedianZone, type ZoneDef } from '../sim/types'
 import { LAYER } from './layers'
 import { roundedRectShape } from './geometry'
 
@@ -19,7 +19,9 @@ function buildGeometry(zones: ZoneDef[]): THREE.BufferGeometry {
   const tint = new THREE.Color()
 
   for (const zone of zones) {
-    if (!isGreenZone(zone)) continue
+    // Medians are green, but they stand on a kerb above the road rather than
+    // being painted onto the card under it. `Medians` draws those.
+    if (!isGreenZone(zone) || isMedianZone(zone)) continue
 
     /*
      * A polygon zone carries world coordinates in its vertices — shapes are
@@ -102,7 +104,7 @@ export function Parks({ zones }: { zones: ZoneDef[] }) {
   const geom = useMemo(() => buildGeometry(zones), [zones])
   useEffect(() => () => geom.dispose(), [geom])
 
-  if (!zones.some(isGreenZone)) return null
+  if (!zones.some((z) => isGreenZone(z) && !isMedianZone(z))) return null
 
   /*
    * Coplanar paint on the card: it takes the key light, it does not cast.

@@ -34,8 +34,11 @@ export function Trees({ items }: { items: TreeInst[] }) {
       q.setFromAxisAngle(up, t.rot)
 
       const trunkH = t.scale * 1.15
+      // Ground level under this tree — 0 everywhere but on a median, which
+      // stands on its kerb.
+      const base = t.y ?? 0
       m.compose(
-        new THREE.Vector3(t.x, 0, t.z),
+        new THREE.Vector3(t.x, base, t.z),
         q,
         new THREE.Vector3(t.scale * 0.32, trunkH, t.scale * 0.32),
       )
@@ -43,7 +46,7 @@ export function Trees({ items }: { items: TreeInst[] }) {
 
       // Crown sits on top of the trunk, squashed slightly so it reads as a canopy.
       m.compose(
-        new THREE.Vector3(t.x, trunkH + t.scale * 0.62, t.z),
+        new THREE.Vector3(t.x, base + trunkH + t.scale * 0.62, t.z),
         q,
         new THREE.Vector3(t.scale, t.scale * 0.85, t.scale),
       )

@@ -31,6 +31,10 @@ export type GroupHud = {
 export type LayerState = {
   /** Street names, drawn along the roads. */
   labels: boolean;
+  /** Name signs on posts at the block corners. */
+  streetSigns: boolean;
+  /** Lamp columns along the streets, lit after dusk. */
+  streetLights: boolean;
   /** Overhead signal heads on their mast arms. */
   signals: boolean;
   /** Move the sun with the clock. Off pins the map at noon. */
@@ -41,6 +45,8 @@ export type LayerState = {
   perspective: boolean;
   /** Blur what the player isn't looking at. */
   depthOfField: boolean;
+  /** Let the lamps, lenses and indicators glow. */
+  bloom: boolean;
   /** Autonomous low aerial flyover, edge to edge. Press C to jump to a new path. */
   cinematicCamera: boolean;
 };
@@ -51,9 +57,19 @@ export type LayerName = keyof LayerState;
 export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
   { name: "labels", label: "Street names", hint: "Name every road on the map" },
   {
+    name: "streetSigns",
+    label: "Street signs",
+    hint: "Name blades on posts at the corners. Lettered from the street-level camera",
+  },
+  {
     name: "signals",
     label: "Signal heads",
     hint: "Overhead heads showing each approach's colour",
+  },
+  {
+    name: "streetLights",
+    label: "Street lights",
+    hint: "Lamp columns along every street. They come on with the clock",
   },
   {
     name: "daynight",
@@ -74,6 +90,11 @@ export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
     name: "depthOfField",
     label: "Depth of field",
     hint: "Blur what you aren't looking at, like a tilt-shift model photo",
+  },
+  {
+    name: "bloom",
+    label: "Bloom",
+    hint: "Signals, street lights and headlamps glow. Nothing else is bright enough to",
   },
   {
     name: "cinematicCamera",
@@ -144,11 +165,14 @@ export const useHud = create<HudState>(() => ({
   demand: 1,
   layers: {
     labels: true,
+    streetSigns: true,
+    streetLights: true,
     signals: true,
     daynight: true,
     parking: true,
     perspective: true,
     depthOfField: true,
+    bloom: true,
     cinematicCamera: false,
   },
   timeOfDay: hourOfDay(0),

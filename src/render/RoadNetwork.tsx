@@ -24,7 +24,8 @@ import {
   type LevelDef,
   type RoadDef,
 } from '../sim/types'
-import { flatRoundedRect } from './geometry'
+import { flatPolygon } from './geometry'
+import { CORNER_RADIUS, junctionArms, junctionOutline } from './junctionShape'
 import { LAYER } from './layers'
 
 
@@ -190,16 +191,9 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
     const parkingItems: Ribbon[] = []
     const dividerItems: Ribbon[] = []
     const markings: Rect[] = []
-    const junctions: { x: number; z: number; size: number }[] = []
-
-    for (const node of level.nodes) {
-      if (node.kind !== 'junction') continue
-      junctions.push({
-        x: node.pos[0],
-        z: node.pos[1],
-        size: junctionSize(level, node.id),
-      })
-    }
+    // Each junction's arms, so the crossing can be paved to the shape of the
+    // roads that actually meet it.
+    const junctions = junctionArms(level)
 
     for (const road of level.roads) {
       const w = roadWidth(road)
@@ -488,11 +482,32 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
    * so there is nothing to gain by keeping them separate.
    */
   const junctionGeom = useMemo(
-    () => mergeAt(junctions, (j) => flatRoundedRect(j.size / 2, j.size / 2, 3)),
+    () =>
+      mergeAt(junctions, (j) =>
+        flatPolygon(
+          junctionOutline(j.arms, j.size / 2, CORNER_RADIUS).map((p) => [p.x, p.z]),
+        ),
+      ),
     [junctions],
   )
+  /*
+   * The kerb is the same outline grown by the lip on every side: each arm a lip
+   * wider, each arm reaching a lip further, and the corner fillet a lip tighter
+   * about the same centre. That last part is what keeps the roads' own kerb
+   * ribbons — which run straight through the crossing — buried inside this
+   * rather than poking a square notch out across the rounded corner.
+   */
   const junctionCurbGeom = useMemo(
-    () => mergeAt(junctions, (j) => flatRoundedRect(j.size / 2 + 0.7, j.size / 2 + 0.7, 3.6)),
+    () =>
+      mergeAt(junctions, (j) =>
+        flatPolygon(
+          junctionOutline(
+            j.arms.map((a) => ({ ...a, plus: a.plus + CURB_LIP, minus: a.minus + CURB_LIP })),
+            j.size / 2 + CURB_LIP,
+            CORNER_RADIUS - CURB_LIP,
+          ).map((p) => [p.x, p.z]),
+        ),
+      ),
     [junctions],
   )
 

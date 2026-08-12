@@ -12,6 +12,7 @@ import {
 } from "../sim/types";
 import { SIGNAL } from "../art/palette";
 import type { World } from "../sim/world";
+import { useGlow } from "./glow";
 
 /**
  * Signal heads: a pole at the kerb, bent through ninety degrees over the road,
@@ -204,6 +205,8 @@ export function SignalHeads({
   }, [heads]);
 
   const panels = useRef<THREE.InstancedMesh>(null);
+  // The lens is a light source, so it is one of the few things that blooms.
+  useGlow(panels);
 
   useLayoutEffect(() => {
     const m = new THREE.Matrix4();

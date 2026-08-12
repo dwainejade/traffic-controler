@@ -48,6 +48,7 @@ capacity, green-wave resonance).
 - Buildings, parks, trees, parked cars, bus stops and street labels scattered procedurally with a spatial index for fast placement
 - Cinematic camera mode and click-to-focus on any junction
 - Apple Maps–style art direction: soft shadows, muted palette, no hard key light, `NoToneMapping` to keep near-whites from crushing
+- Selective bloom on the light sources only — signals, street lamps, headlamps and indicators register themselves as emitters, because on a palette this high-key a luminance threshold finds the buildings long before it finds a green light
 
 ### UI / UX
 
@@ -68,9 +69,11 @@ capacity, green-wave resonance).
 ```text
 src/sim/      types.ts, network.ts, conflicts.ts, junction.ts, routing.ts,
               signals.ts, idm.ts, world.ts, centreline.ts, validate.ts, parking.ts
-src/render/   Scene.tsx, RoadNetwork.tsx, Ground.tsx, Buildings.tsx, Trees.tsx,
-              Simulation.tsx, Controls.tsx, scatter.ts, geometry.ts,
-              CinematicCamera.tsx, CrashFocus.tsx, BusStops.tsx, ParkedCars.tsx
+src/render/   Scene.tsx, RoadNetwork.tsx, junctionShape.ts, Ground.tsx,
+              Buildings.tsx, Trees.tsx, Simulation.tsx, Controls.tsx,
+              scatter.ts, geometry.ts, glow.ts, CinematicCamera.tsx,
+              CrashFocus.tsx, BusStops.tsx, ParkedCars.tsx, StreetSigns.tsx,
+              StreetLights.tsx
 src/levels/   tJunction, crossroads, fiveWays, fourCorners, curveTest, osm/
 src/ui/       Hud.tsx, ProgramPanel.tsx, SplitBar.tsx, ImportForm.tsx,
               LevelSheet.tsx, hudStore.ts
@@ -110,16 +113,32 @@ priority order:
       display of signal colour now; the pole repeater strip and the coloured
       stop bars on the road are gone, and the layer is on by default
 - [ ] Update turn signals
-- [ ] Add street signs at corners of block
-- [ ] Fix block corners so that they are rounded instead of indented
+- [x] Add street signs at corners of block — a post on every corner of every
+      junction, with a blade per street lying parallel to the street it names;
+      instanced geometry throughout, lettered only when the text would be big
+      enough on screen to read
+- [x] Fix block corners so that they are rounded outward instead of indented —
+      a junction is paved to the shape of the arms that meet it, with a kerb
+      radius turned at each corner, instead of being stamped with a square box
+      wider than any road on it
 - [ ] Dynamic fog to make city more moody
-- [ ] Add street lights
+- [x] Add street lights — a lamp column every 32m and at both ends of every
+      block, with a warm fill that winds up after dusk. Three instanced meshes
+      and one light for the whole map, written once
 - [ ] Fix green fields
 - [ ] Add more park features like baseball fields, basketball courts
 - [ ] Add more detailed buildings
 - [ ] Add FPS mode with walking and flying
 - [ ] Add trains
 - [ ] Stream in terrain live
+- [ ] remove traffic light controls
+- [ ] improve car simulation
+  - [ ] make some streets more busy
+  - [ ] dynamic traffic patterns based on time of day
+  - [ ] improve collision avoidance
+  - [ ] improve driver IQ so that it tries to find best route off map to destination
+  - [ ] add driver personalities so that cars travel at different speeds and different level of risk
+  - [ ] add lane switching
 
 ## Notes for contributors
 
