@@ -106,7 +106,9 @@ priority order:
       ground plane; tunnels and interchange ramp geometry are still open
 - [ ] Make sky similar to realworld
 - [ ] Optimizing for larger maps
-- [ ] Only show ovehead signals. Remove others
+- [x] Only show overhead signals. Remove others — the mast-arm head is the sole
+      display of signal colour now; the pole repeater strip and the coloured
+      stop bars on the road are gone, and the layer is on by default
 - [ ] Update turn signals
 - [ ] Add street signs at corners of block
 - [ ] Fix block corners so that they are rounded instead of indented
@@ -116,6 +118,8 @@ priority order:
 - [ ] Add more park features like baseball fields, basketball courts
 - [ ] Add more detailed buildings
 - [ ] Add FPS mode with walking and flying
+- [ ] Add trains
+- [ ] Stream in terrain live
 
 ## Notes for contributors
 

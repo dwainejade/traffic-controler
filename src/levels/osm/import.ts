@@ -259,6 +259,58 @@ function coastlinePolygon(pts: P[], halfX: number, halfZ: number): P[] | null {
   return poly;
 }
 
+/**
+ * Sutherland-Hodgman: `poly` clipped to the axis-aligned box. A polygon
+ * entirely inside is returned unchanged; entirely outside comes back empty.
+ *
+ * Needed for anything surveyed at real-world scale rather than city-block
+ * scale — a waterfront park or a cemetery routinely runs for kilometres past
+ * both edges of even the largest import box, and "keep it whole or drop it"
+ * (the rule everything else here uses, buildings included) turns those into
+ * nothing at all rather than the slice that legitimately falls inside.
+ */
+function clipPolyToBox(poly: P[], halfX: number, halfZ: number): P[] {
+  type Edge = { inside: (p: P) => boolean; cross: (a: P, b: P) => P };
+  const edges: Edge[] = [
+    {
+      inside: (p) => p.x <= halfX,
+      cross: (a, b) => ({ x: halfX, z: a.z + ((halfX - a.x) / (b.x - a.x)) * (b.z - a.z) }),
+    },
+    {
+      inside: (p) => p.x >= -halfX,
+      cross: (a, b) => ({ x: -halfX, z: a.z + ((-halfX - a.x) / (b.x - a.x)) * (b.z - a.z) }),
+    },
+    {
+      inside: (p) => p.z <= halfZ,
+      cross: (a, b) => ({ z: halfZ, x: a.x + ((halfZ - a.z) / (b.z - a.z)) * (b.x - a.x) }),
+    },
+    {
+      inside: (p) => p.z >= -halfZ,
+      cross: (a, b) => ({ z: -halfZ, x: a.x + ((-halfZ - a.z) / (b.z - a.z)) * (b.x - a.x) }),
+    },
+  ];
+
+  let output = poly;
+  for (const edge of edges) {
+    const input = output;
+    output = [];
+    if (input.length === 0) break;
+    for (let i = 0; i < input.length; i++) {
+      const cur = input[i];
+      const prev = input[(i - 1 + input.length) % input.length];
+      const curIn = edge.inside(cur);
+      const prevIn = edge.inside(prev);
+      if (curIn) {
+        if (!prevIn) output.push(edge.cross(prev, cur));
+        output.push(cur);
+      } else if (prevIn) {
+        output.push(edge.cross(prev, cur));
+      }
+    }
+  }
+  return output;
+}
+
 // ----------------------------------------------------------------- lane tags
 
 function laneCount(tags: Tags, oneWay: boolean): { fwd: number; bwd: number } {
@@ -1074,8 +1126,15 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
   /*
    * --- 8. Green space.
    *
-   * Same shape as the buildings above and for the same reasons: closed rings
-   * only, kept whole or not at all by centroid, clipped by nothing.
+   * Closed rings only, same as the buildings above, but clipped to the box
+   * rather than kept whole or dropped: a waterfront park or a cemetery
+   * routinely runs for kilometres past both edges of even the largest import
+   * box (Shore Road Park is one continuous way for most of the Brooklyn
+   * shoreline), and rejecting anything whose centroid falls outside the box
+   * — which is what a park like that does even though most of its width is
+   * inside — was silently dropping real parkland rather than showing the
+   * slice that is actually in view. A polygon that never touches the box at
+   * all still costs nothing to skip; `clipPolyToBox` returns it empty.
    *
    * The one addition is the containment pass. OSM routinely maps a park as a
    * `leisure=park` boundary with `landuse=grass` lawns drawn inside it, and
@@ -1095,10 +1154,18 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     if (way.nodes[0] !== way.nodes[way.nodes.length - 1]) continue;
     if (!ring.every((id) => rawNodes.has(id))) continue;
 
-    const poly = ring.map(at);
-    const cx = poly.reduce((s, p) => s + p.x, 0) / poly.length;
-    const cz = poly.reduce((s, p) => s + p.z, 0) / poly.length;
-    if (Math.abs(cx) > halfX + margin || Math.abs(cz) > halfZ + margin) continue;
+    let poly = ring.map(at);
+    const xs = poly.map((p) => p.x);
+    const zs = poly.map((p) => p.z);
+    const outOfBox =
+      Math.min(...xs) < -halfX ||
+      Math.max(...xs) > halfX ||
+      Math.min(...zs) < -halfZ ||
+      Math.max(...zs) > halfZ;
+    if (outOfBox) {
+      poly = clipPolyToBox(poly, halfX + margin, halfZ + margin);
+      if (poly.length < 3) continue; // never touched the box at all
+    }
 
     const twice = signedArea2(poly);
     const area = Math.abs(twice) / 2;

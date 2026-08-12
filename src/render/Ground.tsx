@@ -153,8 +153,15 @@ export function Ground({ level }: { level: LevelDef }) {
           geometry={waterGeom}
           position={[0, LAYER.water, 0]}
           rotation={[-Math.PI / 2, 0, 0]}
-          receiveShadow
         >
+          {/*
+            No `receiveShadow`: open water is one huge near-flat plane, and at
+            a low sun angle a plane that size aliases against the shadow map's
+            fixed resolution into visible banding across it — the same bias
+            tuned for the relief in roads and buildings does not hold up over
+            hundreds of metres of dead-flat mesh. Nothing above the water is
+            expected to shadow it in this style anyway.
+          */}
           <meshLambertMaterial color={PALETTE.water} side={THREE.DoubleSide} />
         </mesh>
       )}

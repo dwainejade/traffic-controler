@@ -1,7 +1,7 @@
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import { INDICATOR, SIGNAL, VEHICLE_COLORS } from "../art/palette";
+import { INDICATOR, VEHICLE_COLORS } from "../art/palette";
 import { SKY } from "../art/daylight";
 import { VEHICLE, type World } from "../sim/world";
 import {
@@ -13,8 +13,6 @@ import {
   truckBodyGeometry,
 } from "./vehicleArt";
 import { LAYER } from "./layers";
-import { sampleLane } from "../sim/network";
-import { LANE_WIDTH } from "../sim/types";
 import { publishHud, useHud } from "../ui/hudStore";
 
 /** Simulation runs at a fixed 60 Hz of simulated time, whatever the render rate. */
@@ -46,18 +44,6 @@ const MAX_TRUCKS = 300;
 const MAX_BUSES = 200;
 
 const HUD_INTERVAL = 1 / 6;
-
-/**
- * Purely cosmetic pull-back for the painted stop bar, on top of `lane.stopS`.
- *
- * `stopS` already sits `STOP_BAR_GAP` (0.8m) past the crosswalk, which is
- * where cars actually stop — but the bar itself is 0.85m deep, so its own
- * near edge lands back at the crosswalk's outer stripe with only a few
- * centimetres to spare. On screen that reads as the bar sitting inside the
- * crosswalk rather than behind it. This only moves the paint; the sim still
- * stops cars at the unpadded `lane.stopS`.
- */
-const BAR_VISUAL_SETBACK = 1.2;
 
 /** Indicators flash at roughly 1.5 Hz, as real ones do. */
 const BLINK_HZ = 1.5;
@@ -106,7 +92,6 @@ export function Simulation({ world }: { world: World }) {
   const truckBodies = useRef<THREE.InstancedMesh>(null);
   const busBodies = useRef<THREE.InstancedMesh>(null);
   const shadows = useRef<THREE.InstancedMesh>(null);
-  const bars = useRef<THREE.InstancedMesh>(null);
   const blinkers = useRef<THREE.InstancedMesh>(null);
   const heads = useRef<THREE.InstancedMesh>(null);
   const tails = useRef<THREE.InstancedMesh>(null);
@@ -121,35 +106,6 @@ export function Simulation({ world }: { world: World }) {
   const busGeom = useMemo(() => bodyGeometry(), []);
   const blob = useMemo(() => blobTexture(), []);
   const glow = useMemo(() => glowTexture(), []);
-
-  /** Approach lanes carry the stop bars, which are the primary signal display. */
-  const approaches = useMemo(
-    () => world.net.lanes.filter((l) => l.stopS >= 0),
-    [world],
-  );
-
-  // Stop bars never move, so their transforms are written once.
-  useLayoutEffect(() => {
-    const mesh = bars.current;
-    if (!mesh) return;
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const up = new THREE.Vector3(0, 1, 0);
-    const p = { x: 0, z: 0, angle: 0 };
-
-    approaches.forEach((lane, i) => {
-      sampleLane(lane, Math.max(0, lane.stopS - BAR_VISUAL_SETBACK), p);
-      q.setFromAxisAngle(up, p.angle);
-      m.compose(
-        new THREE.Vector3(p.x, LAYER.stopBar, p.z),
-        q,
-        new THREE.Vector3(LANE_WIDTH * 0.86, 1, 0.85),
-      );
-      mesh.setMatrixAt(i, m);
-    });
-    mesh.count = approaches.length;
-    mesh.instanceMatrix.needsUpdate = true;
-  }, [approaches, world]);
 
   useFrame((_, delta) => {
     if (import.meta.env.DEV) {
@@ -349,32 +305,6 @@ export function Simulation({ world }: { world: World }) {
       }
     }
 
-    // --- Stop bars take the colour of the movement they govern.
-    const bar = bars.current;
-    if (bar) {
-      const colour = new THREE.Color();
-      approaches.forEach((lane, i) => {
-        const junction = lane.junction
-          ? world.junctions.get(lane.junction)
-          : undefined;
-        let state: keyof typeof SIGNAL = "red";
-        if (junction) {
-          const serving = junction.phases[junction.current].connectors;
-          const mine = lane.next.some((c) => serving.includes(c));
-          if (mine)
-            state =
-              junction.state === "green"
-                ? "green"
-                : junction.state === "amber"
-                  ? "amber"
-                  : "red";
-        }
-        colour.set(SIGNAL[state]);
-        bar.setColorAt(i, colour);
-      });
-      if (bar.instanceColor) bar.instanceColor.needsUpdate = true;
-    }
-
     // --- HUD is throttled; per-frame React updates would cost more than the sim.
     hudTimer.current += delta;
     if (hudTimer.current >= HUD_INTERVAL) {
@@ -436,14 +366,6 @@ export function Simulation({ world }: { world: World }) {
         args={[INDICATOR_GEOM, undefined, MAX_INDICATORS]}
       >
         <meshBasicMaterial color={INDICATOR} toneMapped={false} />
-      </instancedMesh>
-
-      {/* Unlit so signals stay the brightest, most saturated thing on screen. */}
-      <instancedMesh
-        ref={bars}
-        args={[UNIT_PLANE, undefined, approaches.length]}
-      >
-        <meshBasicMaterial toneMapped={false} />
       </instancedMesh>
     </group>
   );

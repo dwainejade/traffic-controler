@@ -44,6 +44,4 @@ export const LAYER = {
   beam: at(12),
   /** Contact shadows, which belong over the paint a vehicle stands on. */
   shadow: at(13),
-  /** Signal stop bars — the brightest thing down here, and always on top. */
-  stopBar: at(14),
 } as const;

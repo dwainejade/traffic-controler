@@ -31,7 +31,7 @@ export type GroupHud = {
 export type LayerState = {
   /** Street names, drawn along the roads. */
   labels: boolean;
-  /** Signal heads on poles, with their countdowns. */
+  /** Overhead signal heads on their mast arms. */
   signals: boolean;
   /** Move the sun with the clock. Off pins the map at noon. */
   daynight: boolean;
@@ -53,7 +53,7 @@ export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
   {
     name: "signals",
     label: "Signal heads",
-    hint: "Poles showing each approach's colour and countdown",
+    hint: "Overhead heads showing each approach's colour",
   },
   {
     name: "daynight",
@@ -144,7 +144,7 @@ export const useHud = create<HudState>(() => ({
   demand: 1,
   layers: {
     labels: true,
-    signals: false,
+    signals: true,
     daynight: true,
     parking: true,
     perspective: true,

@@ -195,7 +195,7 @@ function DevHandle() {
  */
 const FOCUS_RANGE_OUT = 1000;
 const FOCUS_RANGE_IN = 60;
-const BOKEH_SCALE_OUT = 0.1;
+const BOKEH_SCALE_OUT = 0.2;
 const BOKEH_SCALE_IN = 2;
 
 /**

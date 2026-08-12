@@ -17,10 +17,10 @@ import type { World } from "../sim/world";
  * Signal heads: a pole at the kerb, bent through ninety degrees over the road,
  * carrying a lit panel that shows this approach's colour.
  *
- * The point is legibility rather than decoration. Coloured stop bars painted on
- * the road say what the signal is doing, but not *whose* signal it is — at a
- * five-arm junction you cannot tell which bar belongs to the approach you are
- * looking at. A head standing over its own approach can only mean one thing.
+ * This is the only display of signal state. Painting the colour on the road
+ * instead said what the signal was doing but not *whose* signal it was — at a
+ * five-arm junction you could not tell which mark belonged to the approach you
+ * were looking at. A head standing over its own approach can only mean one thing.
  */
 
 /** Metres. */
@@ -151,8 +151,6 @@ function buildHeads(level: LevelDef, world: World): Head[] {
 }
 
 const PANEL_GEOM = new THREE.BoxGeometry(PANEL_W, PANEL_H, PANEL_D);
-/** Slim repeater down the pole, so the signal reads from beside it too. */
-const STRIP_GEOM = new THREE.BoxGeometry(0.1, 1.6, 0.22);
 
 export function SignalHeads({
   level,
@@ -206,7 +204,6 @@ export function SignalHeads({
   }, [heads]);
 
   const panels = useRef<THREE.InstancedMesh>(null);
-  const strips = useRef<THREE.InstancedMesh>(null);
 
   useLayoutEffect(() => {
     const m = new THREE.Matrix4();
@@ -218,9 +215,6 @@ export function SignalHeads({
       q.setFromAxisAngle(up, head.facing);
       m.compose(head.panel, q, one);
       panels.current?.setMatrixAt(i, m);
-
-      m.compose(new THREE.Vector3(head.foot.x, 2.6, head.foot.z), q, one);
-      strips.current?.setMatrixAt(i, m);
     });
 
     /*
@@ -234,10 +228,6 @@ export function SignalHeads({
     if (panels.current) {
       panels.current.instanceMatrix.needsUpdate = true;
       panels.current.computeBoundingSphere();
-    }
-    if (strips.current) {
-      strips.current.instanceMatrix.needsUpdate = true;
-      strips.current.computeBoundingSphere();
     }
   }, [heads]);
 
@@ -268,13 +258,10 @@ export function SignalHeads({
 
       colour.set(SIGNAL[state]);
       panels.current?.setColorAt(i, colour);
-      strips.current?.setColorAt(i, colour);
     });
 
     if (panels.current?.instanceColor)
       panels.current.instanceColor.needsUpdate = true;
-    if (strips.current?.instanceColor)
-      strips.current.instanceColor.needsUpdate = true;
   });
 
   if (heads.length === 0) return null;
@@ -291,9 +278,6 @@ export function SignalHeads({
         args={[PANEL_GEOM, undefined, heads.length]}
         castShadow
       >
-        <meshBasicMaterial />
-      </instancedMesh>
-      <instancedMesh ref={strips} args={[STRIP_GEOM, undefined, heads.length]}>
         <meshBasicMaterial />
       </instancedMesh>
     </group>
