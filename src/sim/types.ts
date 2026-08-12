@@ -128,6 +128,14 @@ export type RoadDef = {
    * `source` node one-way — every source must both feed and drain the map.
    */
   oneWay?: boolean
+  /**
+   * A raised span of the carriageway — a bridge over water or an overpass
+   * over another road — as an arc-length range along the centreline
+   * (0 = `from`, road length = `to`). The renderer ramps up to `RISE.bridge`
+   * (or `RISE.overpass`) over `RAMP_LENGTH` at each end and holds it flat
+   * across the span. Purely presentational; the simulation never reads it.
+   */
+  deck?: { from: number; to: number; kind: 'bridge' | 'overpass' }
 }
 
 export type ZoneDef = {
@@ -241,6 +249,14 @@ export type LevelDef = {
    * Presentational only.
    */
   water?: [number, number][]
+  /**
+   * Real water bodies surveyed from OSM (`natural=water`) — rivers, ponds,
+   * waterfronts — as independent closed [x, z] loops. Unlike `water`, which
+   * assumes a single loop enclosing one island card, an imported area can
+   * carry any number of disconnected water features, including a river edge
+   * clipped by the import box. Presentational only.
+   */
+  waterBodies?: [number, number][][]
 }
 
 /** Default seconds of traffic to pre-run before a level is handed over. */
@@ -298,6 +314,35 @@ export function nodeById(level: LevelDef, id: NodeId): MapNode {
   const n = level.nodes.find((x) => x.id === id)
   if (!n) throw new Error(`Unknown node "${id}" in level "${level.id}"`)
   return n
+}
+
+/**
+ * Deck height above ground, metres. A bridge clears real water and so sits
+ * higher than an overpass, which only has to clear another road's traffic.
+ * Fixed constants rather than surveyed clearances — this is presentational,
+ * and one height apiece keeps every deck's ramp geometry uniform.
+ */
+export const RISE = { bridge: 6, overpass: 4 } as const
+
+/** How far, in arc length, a deck ramps from ground level up to full rise. */
+export const RAMP_LENGTH = 25
+
+/**
+ * Height above ground at arc distance `s` along a road carrying `deck`, or 0
+ * for a road with none. Smoothstepped in and out of the flat span so the
+ * ramp has no kink where it meets level ground.
+ */
+export function deckHeightAt(deck: RoadDef['deck'], s: number): number {
+  if (!deck) return 0
+  const rise = RISE[deck.kind]
+  const rampUpStart = deck.from - RAMP_LENGTH
+  const rampDownEnd = deck.to + RAMP_LENGTH
+  if (s <= rampUpStart || s >= rampDownEnd) return 0
+
+  const smoothstep = (t: number) => t * t * (3 - 2 * t)
+  if (s < deck.from) return rise * smoothstep((s - rampUpStart) / RAMP_LENGTH)
+  if (s > deck.to) return rise * smoothstep((rampDownEnd - s) / RAMP_LENGTH)
+  return rise
 }
 
 /**

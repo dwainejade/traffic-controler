@@ -16,17 +16,20 @@ import {
   LANE_WIDTH,
   PARKING_WIDTH,
   STOP_OFFSET,
+  deckHeightAt,
   junctionSize,
   nodeById,
   roadEdges,
   roadWidth,
   type LevelDef,
+  type RoadDef,
 } from '../sim/types'
 import { flatRoundedRect } from './geometry'
 import { LAYER } from './layers'
 
 
-type Rect = { x: number; z: number; angle: number; w: number; l: number }
+/** `y` is the deck's contribution alone — the layer offset is added on top of it. */
+type Rect = { x: number; z: number; angle: number; w: number; l: number; y: number }
 
 const UNIT_PLANE = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2)
 
@@ -51,7 +54,7 @@ function InstancedRects({
     rects.forEach((r, i) => {
       q.setFromAxisAngle(up, r.angle)
       m.compose(
-        new THREE.Vector3(r.x, y, r.z),
+        new THREE.Vector3(r.x, y + r.y, r.z),
         q,
         new THREE.Vector3(r.w, 1, r.l),
       )
@@ -123,18 +126,28 @@ function mergeAt<T extends { x: number; z: number }>(
  * because a street is not necessarily symmetric about its centreline: a
  * kerbside bus lane sits on one side only, and the paved surface has to grow on
  * that side alone or the whole street visibly drifts off its own centre.
+ *
+ * `deck`, when a road carries one, is read against arc length from the start
+ * of `poly` — true for every caller here, since asphalt/curb/bus/parking
+ * ribbons all walk the untrimmed centreline starting at `road.from`, exactly
+ * where `deck.from`/`deck.to` were measured on import.
  */
-function buildRibbons(items: { poly: Pt[]; left: number; right: number }[]): THREE.BufferGeometry {
+function buildRibbons(
+  items: { poly: Pt[]; left: number; right: number; deck?: RoadDef['deck'] }[],
+): THREE.BufferGeometry {
   const positions: number[] = []
   const indices: number[] = []
 
-  for (const { poly, left: leftOff, right: rightOff } of items) {
+  for (const { poly, left: leftOff, right: rightOff, deck } of items) {
     const left = offsetPoly(poly, leftOff)
     const right = offsetPoly(poly, rightOff)
     const base = positions.length / 3
 
+    let s = 0
     for (let i = 0; i < poly.length; i++) {
-      positions.push(left[i].x, 0, left[i].z, right[i].x, 0, right[i].z)
+      if (i > 0) s += Math.hypot(poly[i].x - poly[i - 1].x, poly[i].z - poly[i - 1].z)
+      const y = deckHeightAt(deck, s)
+      positions.push(left[i].x, y, left[i].z, right[i].x, y, right[i].z)
     }
     for (let i = 0; i < poly.length - 1; i++) {
       // Wound so the face normal points up (+y); a downward winding would be
@@ -170,7 +183,7 @@ function halfOfNode(level: LevelDef, id: string): number {
 
 export function RoadNetwork({ level }: { level: LevelDef }) {
   const { asphaltGeom, curbGeom, busGeom, parkingGeom, markings, junctions } = useMemo(() => {
-    type Ribbon = { poly: Pt[]; left: number; right: number }
+    type Ribbon = { poly: Pt[]; left: number; right: number; deck?: RoadDef['deck'] }
     const asphaltItems: Ribbon[] = []
     const curbItems: Ribbon[] = []
     const busItems: Ribbon[] = []
@@ -196,11 +209,12 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
 
       // The full, untrimmed centreline: the carriageway tucks under the
       // junction box exactly as the old full-length rect did.
-      asphaltItems.push({ poly: centre, left: edges.left, right: edges.right })
+      asphaltItems.push({ poly: centre, left: edges.left, right: edges.right, deck: road.deck })
       curbItems.push({
         poly: centre,
         left: edges.left - CURB_LIP,
         right: edges.right + CURB_LIP,
+        deck: road.deck,
       })
 
       /*
@@ -221,12 +235,16 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
        * sits *above* the box, so an untrimmed one paints a lane line straight
        * across the middle of the intersection.
        */
-      const painted = trimPoly(
-        centre,
-        halfOfNode(level, road.from),
-        halfOfNode(level, road.to),
-      )
+      const trimStart = halfOfNode(level, road.from)
+      const painted = trimPoly(centre, trimStart, halfOfNode(level, road.to))
       const paintedLen = polyLength(painted)
+      // `deck` shifted into `painted`'s own arc-length frame, for ribbons built
+      // on the trimmed line rather than the untrimmed centreline.
+      const paintedDeck: RoadDef['deck'] = road.deck && {
+        from: road.deck.from - trimStart,
+        to: road.deck.to - trimStart,
+        kind: road.deck.kind,
+      }
 
       /** Like `mark`, but measured along the trimmed line the dividers use. */
       const markPainted = (s: number, lateral: number, mw: number, ml: number) => {
@@ -237,6 +255,9 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
           angle: Math.atan2(p.tx, p.tz),
           w: mw,
           l: ml,
+          // `s` is arc length along `painted`, which starts `trimStart` into
+          // `centre` — the frame `deck.from`/`deck.to` were measured in.
+          y: deckHeightAt(road.deck, trimStart + s),
         })
       }
 
@@ -258,6 +279,7 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
             poly: painted,
             left: lateral - LANE_LINE / 2,
             right: lateral + LANE_LINE / 2,
+            deck: paintedDeck,
           })
           return
         }
@@ -288,6 +310,7 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
           poly: painted,
           left: inner - PARKING_LINE / 2,
           right: inner + PARKING_LINE / 2,
+          deck: paintedDeck,
         })
       }
       if (parkLeft > 0) {
@@ -296,15 +319,16 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
           poly: painted,
           left: inner - PARKING_LINE / 2,
           right: inner + PARKING_LINE / 2,
+          deck: paintedDeck,
         })
       }
       if (busFwd > 0) {
         const outer = edges.right - parkRight
-        busItems.push({ poly: centre, left: outer - busFwd, right: outer })
+        busItems.push({ poly: centre, left: outer - busFwd, right: outer, deck: road.deck })
       }
       if (busBwd > 0) {
         const outer = edges.left + parkLeft
-        busItems.push({ poly: centre, left: outer, right: outer + busBwd })
+        busItems.push({ poly: centre, left: outer, right: outer + busBwd, deck: road.deck })
       }
 
       /*
@@ -342,6 +366,7 @@ export function RoadNetwork({ level }: { level: LevelDef }) {
           angle: Math.atan2(p.tx, p.tz) + twist,
           w: mw,
           l: ml,
+          y: deckHeightAt(road.deck, s),
         })
       }
 

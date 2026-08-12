@@ -154,6 +154,111 @@ function exitFraction(a: P, b: P, halfX: number, halfZ: number): number {
   return t;
 }
 
+/**
+ * Position along the box's perimeter, walked clockwise (as seen from above,
+ * +x east and +z south) starting at the top-left corner: 0 at (-halfX,
+ * -halfZ), rising through each edge and corner, back to 4 at the start. Used
+ * to close a clipped coastline against the box on the correct side without
+ * hand-listing which corners to include for every entry/exit combination —
+ * "walk clockwise from the exit's perimeter position to the entry's" is the
+ * same one line of arithmetic regardless of which two edges they fall on.
+ */
+function perimeterPos(p: P, halfX: number, halfZ: number): number {
+  const w = 2 * halfX;
+  const h = 2 * halfZ;
+  const x = p.x + halfX; // 0..w, left to right
+  const z = p.z + halfZ; // 0..h, top to bottom
+  if (Math.abs(z) < 1e-6) return x / w; // top edge, left -> right
+  if (Math.abs(x - w) < 1e-6) return 1 + z / h; // right edge, top -> bottom
+  if (Math.abs(z - h) < 1e-6) return 2 + (w - x) / w; // bottom edge, right -> left
+  return 3 + (h - z) / h; // left edge, bottom -> top
+}
+
+/** The box corner at perimeter position `k` (0, 1, 2 or 3), clockwise from top-left. */
+function cornerAt(k: number, halfX: number, halfZ: number): P {
+  return [
+    { x: -halfX, z: -halfZ },
+    { x: halfX, z: -halfZ },
+    { x: halfX, z: halfZ },
+    { x: -halfX, z: halfZ },
+  ][k];
+}
+
+/**
+ * A directed coastline polyline (land on the left, water on the right — OSM's
+ * own convention, and the reason `chain.forward` upstream must be honoured
+ * rather than the chain taken in whatever order it was walked) turned into a
+ * closed water polygon by clipping it to the box and closing the clipped ends
+ * along the box perimeter.
+ *
+ * Only the single-crossing case is handled: the coastline enters the box once
+ * and leaves it once, which is what an ordinary shoreline slicing through an
+ * import box looks like. A box that straddles a headland or an island in the
+ * harbour can cross more than once; skipped rather than guessed at, since a
+ * wrong guess there draws land as sea or the reverse; a box entirely on one
+ * side (no crossing at all) is likewise skipped — there is nothing in the
+ * fetched data to say which side that is.
+ */
+function coastlinePolygon(pts: P[], halfX: number, halfZ: number): P[] | null {
+  const inside = (p: P) => Math.abs(p.x) <= halfX && Math.abs(p.z) <= halfZ;
+
+  // Every index where the polyline is inside the box on one side of it and
+  // outside on the other, in path order — so, in the ordinary case of a
+  // shoreline slicing straight through, exactly two: the crossing the path
+  // goes in on and the one it comes back out on.
+  const crossings: P[] = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    if (inside(a) === inside(b)) continue;
+    const from = inside(a) ? a : b;
+    const to = inside(a) ? b : a;
+    const t = exitFraction(from, to, halfX, halfZ);
+    crossings.push({ x: from.x + (to.x - from.x) * t, z: from.z + (to.z - from.z) * t });
+  }
+
+  // The clipped run of in-box points, opened with a true crossing where the
+  // path enters from outside and closed with one where it leaves — or, if
+  // the path's own end sits inside the box (the chain happens to end there
+  // rather than exiting again), that endpoint instead.
+  const startsInside = inside(pts[0]);
+  const endsInside = inside(pts[pts.length - 1]);
+  const expected = (startsInside ? 0 : 1) + (endsInside ? 0 : 1);
+  if (crossings.length !== expected) return null; // a headland or an island: more than one
+  // shore crossing the box, or (0 crossings, nothing inside) neither edge nor interior — both
+  // out of scope, see above.
+  if (!startsInside && !endsInside && crossings.length === 0) return null;
+
+  const inner = pts.filter(inside);
+  if (inner.length === 0 && crossings.length === 0) return null;
+
+  const enter = startsInside ? pts[0] : crossings[0];
+  const exit = endsInside ? pts[pts.length - 1] : crossings[crossings.length - 1];
+  const poly: P[] = [enter, ...inner.filter((p) => p !== enter && p !== exit), exit];
+
+  // Close along the box perimeter, clockwise from the exit back to the entry
+  // — the side that keeps water (the box interior on the coastline's right)
+  // inside the closed loop. `perimeterPos` increases clockwise from 0 to 4
+  // and wraps, so "clockwise from the exit" is each of the four corners'
+  // perimeter position measured onward from the exit's own (wrapped into
+  // [0, 4)) — every corner whose onward distance is less than the entry's is
+  // between them on the walk, and sorting by that distance puts them in the
+  // walking order regardless of which edges the exit and entry sit on.
+  const exitPos = perimeterPos(exit, halfX, halfZ);
+  const enterPos = perimeterPos(enter, halfX, halfZ);
+  const onwardFrom = (pos: number) => ((pos - exitPos) % 4 + 4) % 4;
+  const enterOnward = onwardFrom(enterPos);
+
+  const between = [0, 1, 2, 3]
+    .map((corner) => ({ corner, onward: onwardFrom(corner) }))
+    .filter(({ onward }) => onward > 1e-9 && onward < enterOnward)
+    .sort((a, b) => a.onward - b.onward);
+
+  for (const { corner } of between) poly.push(cornerAt(corner, halfX, halfZ));
+
+  return poly;
+}
+
 // ----------------------------------------------------------------- lane tags
 
 function laneCount(tags: Tags, oneWay: boolean): { fwd: number; bwd: number } {
@@ -639,7 +744,137 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     (c) => rep(c.ids[0]) !== rep(c.ids[c.ids.length - 1]),
   );
 
-  // --- 6. Assemble the level.
+  // Shared by every "kept whole or not at all by centroid" pass below —
+  // buildings, green space, water — so a feature a few metres past the card's
+  // own edge (which is itself grown past the box for the sources) still lands
+  // on the map instead of being clipped off.
+  const margin = 30;
+
+  // --- 6. Water, ahead of road assembly so bridges can be detected as roads
+  // are built.
+  const waterBodies: [number, number][][] = [];
+
+  // 6a. Closed rings — ponds, rivers, wastewater basins. Kept whole or not at
+  // all by centroid, same shape as the green-space pass below, but with
+  // nothing to contain: unlike a park with a lawn inside it, OSM does not
+  // nest water features.
+  for (const way of ways) {
+    if (way.tags?.natural !== "water") continue;
+    const ring = way.nodes.slice(0, -1);
+    if (ring.length < 3) continue;
+    if (way.nodes[0] !== way.nodes[way.nodes.length - 1]) continue;
+    if (!ring.every((id) => rawNodes.has(id))) continue;
+
+    const poly = ring.map(at);
+    const cx = poly.reduce((s, p) => s + p.x, 0) / poly.length;
+    const cz = poly.reduce((s, p) => s + p.z, 0) / poly.length;
+    if (Math.abs(cx) > halfX + margin || Math.abs(cz) > halfZ + margin) continue;
+
+    const area = Math.abs(signedArea2(poly)) / 2;
+    if (area < MIN_GREEN_AREA) continue;
+
+    waterBodies.push(poly.map((p) => [p.x, p.z] as [number, number]));
+  }
+
+  // 6b. Coastline — the sea, a bay, a harbour. OSM does not map open water as
+  // a filled polygon at all; a `natural=coastline` way is the shoreline
+  // itself, an open curve with land on its left and water on its right (the
+  // standing convention every renderer of OSM coastline data relies on,
+  // since nothing else says which side is which). Turned into a water
+  // polygon by closing it along the box edge, on the water side.
+  {
+    const coastWays = ways.filter((w) => w.tags?.natural === "coastline");
+    if (coastWays.length > 0) {
+      const coastEdges: Edge[] = [];
+      for (const way of coastWays) {
+        for (let i = 0; i < way.nodes.length - 1; i++) {
+          const a = way.nodes[i];
+          const b = way.nodes[i + 1];
+          if (!rawNodes.has(a) || !rawNodes.has(b)) continue;
+          coastEdges.push({ a, b, forward: true, tags: way.tags! });
+        }
+      }
+      const coastChains = buildChains(coastEdges);
+      for (const chain of coastChains) {
+        // `chain.forward` is true when `chain.ids` already runs the way the
+        // first edge's own `a -> b` did — which, because every `coastEdges`
+        // entry above was built in the way's original node order, is OSM's
+        // own direction: land on the left, water on the right. `forward:
+        // false` means the walk ran the chain backwards, so reverse it back.
+        const ids = chain.forward ? chain.ids : [...chain.ids].reverse();
+        const poly = coastlinePolygon(ids.map(at), halfX, halfZ);
+        if (poly) waterBodies.push(poly.map((p) => [p.x, p.z] as [number, number]));
+      }
+    }
+  }
+
+  /**
+   * `t` along segment ab where it crosses segment cd, or null if it doesn't.
+   * Used to find where a road's centreline enters or leaves a water polygon.
+   */
+  function segCrossesSeg(a: P, b: P, c: P, d: P): number | null {
+    const r = { x: b.x - a.x, z: b.z - a.z };
+    const s = { x: d.x - c.x, z: d.z - c.z };
+    const denom = r.x * s.z - r.z * s.x;
+    if (Math.abs(denom) < 1e-9) return null;
+    const t = ((c.x - a.x) * s.z - (c.z - a.z) * s.x) / denom;
+    const u = ((c.x - a.x) * r.z - (c.z - a.z) * r.x) / denom;
+    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+    return t;
+  }
+
+  /** Arc-length span of `pts` that lies inside `poly`, or null if it never does. */
+  function spanInsidePoly(pts: P[], poly: P[]): { from: number; to: number } | null {
+    const cum = new Array<number>(pts.length);
+    cum[0] = 0;
+    for (let i = 1; i < pts.length; i++) cum[i] = cum[i - 1] + dist(pts[i - 1], pts[i]);
+
+    let from = Infinity;
+    let to = -Infinity;
+    if (pointInPoly(pts[0].x, pts[0].z, poly)) from = Math.min(from, 0);
+    if (pointInPoly(pts[pts.length - 1].x, pts[pts.length - 1].z, poly)) {
+      to = Math.max(to, cum[cum.length - 1]);
+    }
+    for (let i = 0; i < pts.length - 1; i++) {
+      for (let j = 0; j < poly.length; j++) {
+        const t = segCrossesSeg(pts[i], pts[i + 1], poly[j], poly[(j + 1) % poly.length]);
+        if (t === null) continue;
+        const s = cum[i] + t * (cum[i + 1] - cum[i]);
+        from = Math.min(from, s);
+        to = Math.max(to, s);
+      }
+    }
+    return from <= to ? { from, to } : null;
+  }
+
+  /**
+   * A road's deck span, or undefined if it carries none.
+   *
+   * `bridge=yes`/`bridge=viaduct` is ground truth when OSM tags it; lacking
+   * that, a centreline that geometrically crosses a water body is a bridge
+   * regardless. Either way the water crossing (if any) sets the span exactly
+   * — the tag alone says only that a bridge exists somewhere on the way, not
+   * where, and a way can extend well past the water on both banks.
+   */
+  function findDeck(tags: Tags, line: P[]): RoadDef["deck"] {
+    const tagged = tags.bridge === "yes" || tags.bridge === "viaduct" || Number(tags.layer) > 0;
+
+    for (const poly of waterBodies) {
+      const span = spanInsidePoly(line, poly.map(([x, z]) => ({ x, z })));
+      if (span) return { ...span, kind: "bridge" };
+    }
+    if (!tagged) return undefined;
+
+    // Tagged as elevated but not over water: an overpass across another
+    // road. No water polygon to size the span against, so raise the whole
+    // way — better an overlong deck than a bridge tag silently dropped.
+    const cum = new Array<number>(line.length);
+    cum[0] = 0;
+    for (let i = 1; i < line.length; i++) cum[i] = cum[i - 1] + dist(line[i - 1], line[i]);
+    return { from: 0, to: cum[cum.length - 1], kind: "overpass" };
+  }
+
+  // --- 7. Assemble the level.
   const nodes: MapNode[] = [];
   const roads: RoadDef[] = [];
   const idOf = new Map<number, NodeId>();
@@ -780,6 +1015,8 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     // A one-way street has no backward side to put a bus lane on.
     const busBackward = oneWayTag ? 0 : roadRunsWithWay ? bus.bwd : bus.fwd;
 
+    const deck = findDeck(tags, line);
+
     roads.push({
       id: `r${n++}`,
       from: nameOf(ids[0]),
@@ -793,6 +1030,7 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
         : {}),
       parkingSides: parkingSides(tags, oneWayTag),
       ...(waypoints.length ? { waypoints } : {}),
+      ...(deck ? { deck } : {}),
     });
   }
 
@@ -805,7 +1043,6 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
    * card is cheaper than that, and the card is grown for the sources anyway.
    */
   const footprints: BuildingFootprint[] = [];
-  const margin = 30;
 
   for (const way of ways) {
     if (!way.tags?.building) continue;
@@ -911,6 +1148,7 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     nodes,
     roads,
     zones,
+    ...(waterBodies.length ? { waterBodies } : {}),
     seed: opts.seed ?? 20260810,
     quota: 0,
     timeLimit: 0,

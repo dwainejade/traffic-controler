@@ -108,7 +108,8 @@ const RETRY_DELAY_MS = 2_500;
  *     have coordinates and can spot shared nodes (which is what an intersection
  *     *is* in OSM — ways that share a node, not ways that merely cross);
  *   - traffic signals and crossings, as tagged nodes;
- *   - buildings, water and green space, for real footprints instead of scatter.
+ *   - buildings, water (closed ponds/rivers and open sea coastlines) and green
+ *     space, for real footprints instead of scatter.
  *
  * `way(bbox)` returns whole ways that merely touch the box, so the geometry
  * runs past the edges; the importer clips it and puts sources on the boundary.
@@ -130,6 +131,7 @@ out body;
 (
   way["building"](${box});
   way["natural"="water"](${box});
+  way["natural"="coastline"](${box});
   way["leisure"~"^(park|pitch|garden)$"](${box});
   way["landuse"~"^(grass|cemetery|recreation_ground)$"](${box});
 );
