@@ -28,8 +28,8 @@ import { useGlow } from "./glow";
 const POLE_HEIGHT = 6.4;
 const POLE_RADIUS = 0.16;
 const BEND_RADIUS = 1.1;
-const PANEL_W = 2.0;
-const PANEL_H = 1.15;
+const PANEL_W = 1;
+const PANEL_H = 0.5;
 const PANEL_D = 0.14;
 /** How far the head sits back from the kerb, into the footway. */
 const SETBACK = 1.1;
