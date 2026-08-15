@@ -127,7 +127,7 @@ function buildHeads(level: LevelDef, world: World): Head[] {
       // The arm reaches back across the approach, so the panel hangs over the
       // lanes it governs rather than over the footway.
       const inward = new THREE.Vector3(-side.x, 0, -side.z);
-      const reach = Math.min(half + pavedWidth(road) * 0.28, 7.5);
+      const reach = Math.min(half + pavedWidth(road) * 0.28, 6);
       const path = bentPath(foot, reach, inward);
 
       const panel = path[path.length - 1]
