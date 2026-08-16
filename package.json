@@ -8,7 +8,12 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "fetch:osm": "node tools/fetchOsm.ts"
+    "fetch:osm": "node tools/fetchOsm.ts",
+    "world:serve": "node --import ./tools/tsResolve.mjs server/index.ts",
+    "world:ingest": "node --import ./tools/tsResolve.mjs tools/ingest.ts",
+    "world:export": "node --import ./tools/tsResolve.mjs tools/export.ts",
+    "world:bundle": "node --import ./tools/tsResolve.mjs tools/export.ts --out public/world",
+    "deploy": "npm run world:bundle && VITE_WORLD_DB=/world npm run build && npx wrangler pages deploy dist --project-name traffic-sim --branch main"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",
@@ -28,6 +33,7 @@
     "@vitejs/plugin-react": "^6.0.4",
     "oxlint": "^1.75.0",
     "typescript": "~6.0.2",
-    "vite": "^8.2.0"
+    "vite": "^8.2.0",
+    "wrangler": "^4.123.0"
   }
 }

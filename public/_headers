@@ -1,0 +1,19 @@
+# Cloudflare Pages reads this from the root of the built site. Vite copies
+# everything in public/ verbatim, so it lands in dist/_headers on build.
+
+# Compiled levels are immutable by construction: the filename carries the area
+# id, and a re-bake that changes the contents also changes the importer version
+# behind it. So a browser that has one never needs to ask again — which is the
+# whole reason a multi-megabyte download is acceptable here.
+/world/levels/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The index is the opposite: it is exactly what changes when you bake new areas,
+# and a stale copy means a freshly deployed borough that nobody can see. A
+# minute is short enough to go unnoticed and long enough to absorb a reload.
+/world/areas.json
+  Cache-Control: public, max-age=60
+
+# Vite fingerprints these, so they are safe to keep forever.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

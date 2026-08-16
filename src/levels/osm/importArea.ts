@@ -1,3 +1,4 @@
+import type { LevelDef } from "../../sim/types";
 import { World } from "../../sim/world";
 import { addArea, newAreaId, useLevels } from "../registry";
 import type { SavedArea } from "../store/areaDb";
@@ -8,6 +9,7 @@ import {
   OverpassError,
   splitBbox,
 } from "./overpass";
+import { fetchDbArea, fetchDbLevel } from "./worldDb";
 
 /**
  * Importing an area from inside the app: coordinates in, playable level out.
@@ -62,6 +64,8 @@ export function estimatedMinutes(tiles: number, radius: number): number {
 
 export type ImportPhase =
   | { kind: "idle" }
+  /** Asking the local world store, before any thought of a public mirror. */
+  | { kind: "store" }
   | {
       kind: "fetching";
       endpoint: string;
@@ -126,6 +130,34 @@ export async function importArea(
 
   const name = input.name.trim();
   const bbox = boxAround(input.lat, input.lon, input.radius);
+  /*
+   * The id is settled before anything is fetched, because the world store
+   * compiles the level on its side and a `LevelDef.id` is the remount key for
+   * the whole scene — so it has to be an id this browser knows is free.
+   */
+  const id = newAreaId(name, useLevels.getState().levels.map((l) => l.id));
+
+  /*
+   * The store first, always. When it has the ground this is one gzipped
+   * download of a level that is already compiled — no mirrors, no tiling, no
+   * importing in the browser at all — and when it does not, or is not running,
+   * it answers immediately and we take exactly the path we always did.
+   *
+   * Deliberately not fatal on error. The store is a convenience running on
+   * somebody's laptop; OpenStreetMap is the source of truth, and a store that
+   * is misbehaving must not be able to stop an import that would have worked.
+   */
+  opts.onPhase?.({ kind: "store" });
+  try {
+    const stored = await fetchDbLevel(
+      { levelId: id, name, lat: input.lat, lon: input.lon, radius: input.radius },
+      { signal: opts.signal },
+    );
+    if (stored) return await save(stored, input, name, id, opts);
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw err;
+    console.warn("world store failed, falling back to OpenStreetMap:", err);
+  }
 
   // --- Fetch.
   let file;
@@ -199,8 +231,6 @@ export async function importArea(
   opts.onPhase?.({ kind: "compiling" });
   await new Promise((r) => setTimeout(r, 0));
 
-  const id = newAreaId(name, useLevels.getState().levels.map((l) => l.id));
-
   let level;
   try {
     level = importOsm(file, { id, name });
@@ -211,6 +241,79 @@ export async function importArea(
     );
   }
 
+  return await save(level, input, name, id, opts);
+}
+
+/**
+ * Take a baked area from the world store, by its id.
+ *
+ * The short path: the store compiled this one already, so there is nothing to
+ * fetch, tile, or import — it is a download and the same safety checks every
+ * other area gets. Seconds of Overpass become tens of milliseconds.
+ *
+ * Deliberately does *not* reuse the level id the store baked in. A `LevelDef.id`
+ * is the remount key for the whole scene and has to be unique in this browser,
+ * which is a fact only this browser has; the store has no idea what is already
+ * in the level list. `storeId` keeps the provenance so the listing can tell
+ * which of its areas you already hold.
+ */
+export async function importStoredArea(
+  area: { id: string; name: string; lat: number; lon: number; radius: number },
+  opts: { signal?: AbortSignal; onPhase?: (p: ImportPhase) => void } = {},
+): Promise<SavedArea> {
+  const id = newAreaId(area.name, useLevels.getState().levels.map((l) => l.id));
+
+  opts.onPhase?.({ kind: "store" });
+  let level: LevelDef | null;
+  try {
+    level = await fetchDbArea(area.id, { signal: opts.signal });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw err;
+    throw new ImportError(
+      "Couldn't reach the world store.",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  if (!level) {
+    throw new ImportError(
+      "The world store no longer has that area. Reopen this list to refresh it.",
+    );
+  }
+
+  /*
+   * Renaming the level object rather than the record. Safe precisely because it
+   * has just been parsed out of a response and nothing else holds a reference —
+   * the rule the registry documents is never to *rebuild* a level that is
+   * already in the list, and this one has never been in it.
+   */
+  level.id = id;
+
+  return await save(
+    level,
+    { name: area.name, lat: area.lat, lon: area.lon, radius: area.radius },
+    area.name,
+    id,
+    opts,
+    area.id,
+  );
+}
+
+/**
+ * Check a compiled level and store it.
+ *
+ * Shared by both routes in, and it has to be: a level from the world store went
+ * through the same `importOsm` on the other side of a socket, so it can be empty
+ * or unrunnable in exactly the same ways. Trusting the store because it is ours
+ * is how a blank screen gets shipped.
+ */
+async function save(
+  level: LevelDef,
+  input: ImportInput,
+  name: string,
+  id: string,
+  opts: { signal?: AbortSignal; onPhase?: (p: ImportPhase) => void },
+  storeId?: string,
+): Promise<SavedArea> {
   /*
    * An area with no streets in it compiles perfectly happily into a level with
    * nothing in it — the importer has no opinion about that — and it is only
@@ -249,6 +352,7 @@ export async function importArea(
     radius: input.radius,
     savedAt: Date.now(),
     level,
+    ...(storeId ? { storeId } : {}),
   };
   /*
    * Everything above this point is recoverable by trying again; this is the

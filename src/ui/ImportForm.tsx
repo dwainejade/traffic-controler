@@ -11,6 +11,7 @@ import {
   tileCount,
   type ImportPhase,
 } from "../levels/osm/importArea";
+import { isAvailable } from "../levels/osm/worldDb";
 import { MAX_AREAS, useLevels } from "../levels/registry";
 
 /**
@@ -24,6 +25,8 @@ import { MAX_AREAS, useLevels } from "../levels/registry";
 /** What the phase looks like to somebody watching it. */
 function phaseLabel(p: ImportPhase): string {
   switch (p.kind) {
+    case "store":
+      return "Checking the world store…";
     case "fetching": {
       /*
        * Two counters, and the one that matters is the piece. Mirror attempts
@@ -57,6 +60,20 @@ export function ImportForm({ onImported }: { onImported: (id: string) => void })
   const [radius, setRadius] = useState(String(RADIUS_DEFAULT));
   const [phase, setPhase] = useState<ImportPhase>({ kind: "idle" });
   const abort = useRef<AbortController | null>(null);
+
+  /*
+   * Whether the local world store answered. Probed once and shared across the
+   * app; the answer only changes the wording of the note under the slider, so
+   * starting at false and correcting a moment later is invisible.
+   */
+  const [storeUp, setStoreUp] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void isAvailable().then((up) => live && setStoreUp(up));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const busy = phase.kind !== "idle" && phase.kind !== "error";
   const full = saved.length >= MAX_AREAS;
@@ -197,6 +214,13 @@ export function ImportForm({ onImported }: { onImported: (id: string) => void })
         {Number(radius) > RADIUS_WARN
           ? `A ${(Number(radius) * 2) / 1000}km square, fetched in ${pieces} pieces — allow about ${minutes} minute${minutes === 1 ? "" : "s"}, less where an area overlaps one you already have. Plays as a city rather than a junction.`
           : `A ${Number(radius) * 2}m square, centred on those coordinates.`}
+        {/*
+          * The estimate above is the OpenStreetMap route, which is the one that
+          * takes minutes. With the store running, ground it already holds comes
+          * back in well under a second — so saying nothing here would leave
+          * somebody declining a 5km import that would have been instant.
+          */}
+        {storeUp && " Ground the world store already holds arrives immediately."}
       </p>
 
       {phase.kind === "error" && (

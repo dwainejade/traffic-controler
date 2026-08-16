@@ -63,6 +63,8 @@ capacity, green-wave resonance).
 - Headless console harness (`window.simWorld`, `window.LEVELS`, `SIMDEV`) for driving and inspecting the sim outside the render loop
 - `validateLevel` runs automatically in dev on every level load and asserts core invariants (no illegal phases, every movement reachable, no unreachable OD pairs, no non-finite state, bookkeeping balances)
 - `tools/fetchOsm.ts` for pre-fetching OSM areas into the repo
+- A local **world store** (`server/`, `tools/ingest.ts`) holding OpenStreetMap on
+  disk, so areas load from SQLite instead of Overpass — see below
 
 ## Where the code is
 
@@ -78,6 +80,8 @@ src/levels/   tJunction, crossroads, fiveWays, fourCorners, curveTest, osm/
 src/ui/       Hud.tsx, ProgramPanel.tsx, SplitBar.tsx, ImportForm.tsx,
               LevelSheet.tsx, hudStore.ts
 src/art/      palette.ts, daylight.ts
+server/       db.ts (schema, lattice), worlds.ts (tiles -> level), index.ts (HTTP)
+tools/        fetchOsm.ts, ingest.ts, tsResolve.mjs
 ```
 
 ## Getting started
@@ -89,6 +93,88 @@ npm run dev
 
 Other scripts: `npm run build`, `npm run lint`, `npm run preview`,
 `npm run fetch:osm`.
+
+## The world store
+
+Importing from Overpass costs a round trip per 1.8km of ground — nine of them and
+several minutes for a 5km box — which is fine for a junction and hopeless for a
+borough. The world store keeps OpenStreetMap on disk instead, so an area is a
+download of a level that is already compiled.
+
+Optional in every sense: it is a local process, the app probes for it and falls
+back to Overpass when it is not there, and nothing about the existing import path
+changed.
+
+```bash
+npm run world:ingest -- --region brooklyn   # fetch and compile a borough (~2h)
+npm run world:serve                         # serve it on :8787
+npm run world:ingest -- --status            # what is on disk
+```
+
+Vite proxies `/api` to the store in development, so `npm run dev` picks it up
+with no configuration. Baked areas appear in the level list under **World
+store**; ground the store holds also makes the ordinary import form instant.
+
+Two layers, in `data/worlds.db` (gitignored):
+
+- **`tiles`** — raw Overpass output on a fixed lattice. The source of truth, and
+  the only thing that survives the importer changing. Roughly 0.25 MB per km².
+- **`levels`** — compiled `LevelDef`s keyed by the box that was asked for. What
+  the client actually receives, gzipped on disk and served still compressed.
+
+There is deliberately *no* compiled fragment per tile, which is the obvious
+design and does not work: `importOsm` merges junction clusters and collapses
+degree-2 chains in passes that run over the whole box at once, so a junction
+straddling a tile edge would merge on one side and not the other. Tiles are
+stored raw and compiled in whatever combination an area asks for.
+
+That split is also what makes the two phases separable — `--fetch` is hours of
+somebody else's server and is the part you never want to repeat; `--bake` is
+minutes of local CPU and is the part you *will* repeat, every time the importer
+changes. Both resume where they stopped.
+
+### Deploying it
+
+A compiled level is immutable for a given box and importer version, so a store
+that serves only *baked* areas needs no process at all — it can be a bucket
+behind a CDN:
+
+```bash
+npm run world:export                          # -> data/export/
+aws s3 sync data/export s3://<bucket>/ --delete
+VITE_WORLD_DB=https://<your-cdn> npm run build
+```
+
+The server answers the same URL shape the export writes — `areas.json` and
+`levels/<id>.json.gz` — so the app has one code path and cannot tell a CDN from
+a host. That is deliberate: giving the two stores different endpoints would mean
+the CDN path was never exercised in development.
+
+What a static store gives up is `/api/level?lat=…`, the on-demand compile for a
+box nobody baked. The app asks, is refused, and falls back to OpenStreetMap
+exactly as it does when no store is running.
+
+The exported `.json.gz` files carry no `Content-Encoding` header, and none needs
+setting: the app sniffs the gzip magic bytes and decompresses whatever it is
+handed, so a bucket that sets the header and one that does not both work.
+
+To run it as a service instead, any host with a persistent disk will do (Fly.io
+with a volume, or a plain VPS) — `WORLD_DB`, `WORLD_PORT` and `WORLD_ORIGINS`
+are the knobs, and Node 22.5+ is required for `node:sqlite`. Serverless and edge
+runtimes will not work unmodified, because SQLite needs a real filesystem.
+
+Note that tiles are OpenStreetMap-derived, so anything public is subject to
+**ODbL** — visible "© OpenStreetMap contributors" attribution, and share-alike
+on the derived database.
+
+Bumping `QUERY_VERSION` in `server/db.ts` invalidates tiles (the query changed);
+bumping `IMPORTER_VERSION` invalidates only compiled levels (the importer
+changed), which is a re-bake and not a re-fetch.
+
+Measured on a 600m area: **36ms** via the store against ~11s via Overpass. The
+road network compiles identically either way; the store additionally picks up the
+30m ring of buildings outside the box that `importOsm` wants (`halfX + margin`)
+and a box-sized Overpass query never returns.
 
 ## Future improvements
 
