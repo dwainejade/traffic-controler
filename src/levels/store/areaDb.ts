@@ -34,6 +34,16 @@ export type SavedArea = {
   savedAt: number;
   /** The compiled level. The Overpass response is not kept. */
   level: LevelDef;
+  /**
+   * The world store's id for this area, when it came from there rather than
+   * from OpenStreetMap directly.
+   *
+   * Provenance, so the store listing can show which of its areas you already
+   * hold and pick them instead of downloading a second copy. Absent on
+   * everything imported before the store existed, which is why it is optional —
+   * the object store has no schema, so an old record simply lacks the field.
+   */
+  storeId?: string;
 };
 
 let dbPromise: Promise<IDBDatabase> | null = null;

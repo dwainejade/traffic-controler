@@ -370,6 +370,7 @@ const EMPTY_LIGHTS: THREE.Object3D[] = [];
 
 export function Scene({ level, world }: { level: LevelDef; world: World }) {
   const { buildings, trees } = useMemo(() => scatterLevel(level), [level]);
+  const showTraffic = useHud((s) => s.layers.traffic);
   const showLabels = useHud((s) => s.layers.labels);
   const showStreetSigns = useHud((s) => s.layers.streetSigns);
   const showStreetLights = useHud((s) => s.layers.streetLights);
@@ -475,12 +476,23 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
         <Shopfronts fronts={level.shopfronts} />
       ) : null}
       <Trees items={trees} />
-      <QueuePressure world={world} />
+      {/*
+        The three components that exist because traffic is moving, gated
+        together. `Simulation` owns the fixed-timestep loop, so unmounting it is
+        what actually stops the physics; the other two only read the result, but
+        both walk the network every frame to do it and neither has anything to
+        show once the cars are gone.
+
+        Parked cars are deliberately *not* in here. They are scenery that
+        happens to be car-shaped — static, already on their own layer, and
+        exactly what somebody looking at an empty street still wants to see.
+      */}
+      {showTraffic && <QueuePressure world={world} />}
       {showSignals && <SignalHeads level={level} world={world} />}
       <BusStops world={world} />
       {showParking && <ParkedCars world={world} />}
-      <Simulation world={world} />
-      <CrashFocus world={world} />
+      {showTraffic && <Simulation world={world} />}
+      {showTraffic && <CrashFocus world={world} />}
       {/* Nothing to composite if both effects are off — skip the whole pass. */}
       {(depthOfField || bloom) && (
         <PostFX half={level.half} depthOfField={depthOfField} bloom={bloom} />

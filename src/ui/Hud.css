@@ -683,3 +683,36 @@
 
 }
 
+
+/*
+ * OpenStreetMap credit. A licence condition, so it is always legible — but it
+ * sits bottom-left, under the dock's shadow rather than beside its controls,
+ * because it is a statement about the map and not a thing to be operated.
+ *
+ * Raised clear of the dock on a phone, where the bar is taller and reaches the
+ * full width of the screen.
+ */
+.osm-credit {
+  position: fixed;
+  left: 10px;
+  bottom: 8px;
+  z-index: 2;
+  font-size: 10px;
+  letter-spacing: 0.01em;
+  color: color-mix(in srgb, currentColor 45%, transparent);
+  text-decoration: none;
+  pointer-events: auto;
+}
+
+.osm-credit:hover,
+.osm-credit:focus-visible {
+  color: color-mix(in srgb, currentColor 80%, transparent);
+  text-decoration: underline;
+}
+
+@media (max-width: 767px) {
+  .osm-credit {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 4px);
+    font-size: 9px;
+  }
+}

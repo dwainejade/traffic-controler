@@ -4,6 +4,20 @@ import type { FailReason, GameState, World } from "../sim/world";
 
 /** Optional map overlays, toggled from the layers menu. */
 export type LayerState = {
+  /**
+   * Moving traffic: the cars themselves, the queue overlay, and the simulation
+   * that drives them.
+   *
+   * Unlike every other layer here this one is not presentational. Turning it off
+   * unmounts the simulation rather than hiding its output, because the cost this
+   * exists to remove is the physics, not the draw calls — a city steps thousands
+   * of vehicles a frame, and skipping the meshes while still stepping them would
+   * save almost nothing.
+   *
+   * The world keeps its state while off, so the traffic that comes back is the
+   * traffic that left, paused mid-journey rather than restarted.
+   */
+  traffic: boolean;
   /** Street names, drawn along the roads. */
   labels: boolean;
   /** Name signs on posts at the block corners. */
@@ -34,6 +48,16 @@ export type LayerName = keyof LayerState;
 
 /** Menu order and wording live with the state so a new layer is one edit. */
 export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
+  /*
+   * First, because it is the only entry that changes what the machine is doing
+   * rather than what the map looks like — and because somebody hunting for the
+   * frame rate should find it before the fourth scenery toggle.
+   */
+  {
+    name: "traffic",
+    label: "Traffic",
+    hint: "Run the simulation. Off stops the cars and the physics behind them — the cheapest way to look at a big map. Traffic resumes where it left off",
+  },
   { name: "labels", label: "Street names", hint: "Name every road on the map" },
   {
     name: "streetSigns",
@@ -150,6 +174,7 @@ export const useHud = create<HudState>(() => ({
   simLanesTotal: 0,
   simRadius: null,
   layers: {
+    traffic: true,
     labels: true,
     streetSigns: true,
     streetLights: true,

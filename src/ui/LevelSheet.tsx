@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { LevelDef } from "../sim/types";
 import { LEVELS } from "../levels";
-import { addTransientLevel, removeArea, useLevels } from "../levels/registry";
+import { ImportError, importStoredArea } from "../levels/osm/importArea";
+import { listDbAreas, type DbArea } from "../levels/osm/worldDb";
+import { addTransientLevel, MAX_AREAS, removeArea, useLevels } from "../levels/registry";
 import { benchLevel } from "../levels/bench";
 import { ImportForm } from "./ImportForm";
 import { Sheet } from "./Sheet";
@@ -65,6 +67,98 @@ function SavedRow({
 /** Half-extents offered as one-click benchmarks, in metres. */
 const BENCH_SIZES = [600, 1000, 1500, 2000, 2500];
 
+/**
+ * Areas the local world store has ready, if it is running.
+ *
+ * A whole borough is sixty-odd of these, so they are *listed* rather than
+ * loaded: the list is a few kilobytes, and a compiled cell is megabytes. One is
+ * downloaded when somebody picks it, and from then on it is an ordinary saved
+ * area — which is what keeps this out of the registry entirely.
+ */
+function StoreGroup({
+  current,
+  onPick,
+}: {
+  current: LevelDef;
+  onPick: (id: string) => void;
+}) {
+  const saved = useLevels((s) => s.saved);
+  const [areas, setAreas] = useState<DbArea[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  /*
+   * Refreshed on mount rather than once at boot, because the thing that changes
+   * this list is the ingest tool running in another terminal — so reopening the
+   * level list is the natural way to pick up a borough that has just finished
+   * baking.
+   */
+  useEffect(() => {
+    let live = true;
+    void listDbAreas().then((list) => live && setAreas(list));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // No store, or a store with nothing in it: say nothing at all. Most people
+  // will never run one, and an empty section is a question they cannot answer.
+  if (!areas || areas.length === 0) return null;
+
+  const full = saved.length >= MAX_AREAS;
+  /** Store ids already held, so the same cell is not downloaded twice. */
+  const held = new Map(saved.filter((a) => a.storeId).map((a) => [a.storeId!, a.id]));
+
+  const take = async (area: DbArea) => {
+    const mine = held.get(area.id);
+    if (mine) return onPick(mine);
+    if (full || busy) return;
+
+    setBusy(area.id);
+    setError(null);
+    try {
+      const added = await importStoredArea(area);
+      onPick(added.id);
+    } catch (err) {
+      setError(err instanceof ImportError ? err.message : "Couldn't load that area.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="level-group">
+      <div className="level-head">World store</div>
+      {areas.map((a) => {
+        const mine = held.get(a.id);
+        return (
+          <div
+            key={a.id}
+            className={"level-row" + (mine && mine === current.id ? " is-current" : "")}
+          >
+            <button
+              className="level-pick is-stacked"
+              onClick={() => void take(a)}
+              disabled={busy !== null || (full && !mine)}
+            >
+              <span className="level-name">{a.name}</span>
+              <span className="level-detail">
+                {busy === a.id
+                  ? "Loading…"
+                  : mine
+                    ? "saved"
+                    : `${(a.radius * 2) / 1000}km · ${(a.bytes / 1024 / 1024).toFixed(1)} MB`}
+              </span>
+            </button>
+          </div>
+        );
+      })}
+      {error && <p className="level-empty">{error}</p>}
+      {full && <p className="level-empty">{MAX_AREAS} saved areas is the limit — delete one to add another.</p>}
+    </div>
+  );
+}
+
 export function LevelSheet({
   current,
   onPick,
@@ -121,6 +215,13 @@ export function LevelSheet({
           />
         ))}
       </div>
+
+      {/*
+        Above the importer and below your own areas, because that is the order
+        of effort: what you already have, then what is a download away, then
+        what is a trip to OpenStreetMap away.
+      */}
+      <StoreGroup current={current} onPick={pick} />
 
       {/*
         Benchmark cities, dev only. Sizes are offered rather than listed,

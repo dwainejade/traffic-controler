@@ -104,6 +104,29 @@ export function Hud({
   const barIsThreat = hud.delayBudget !== null;
   const urgent = hud.timeLeft <= 15;
   const throughput = hud.elapsed > 0 ? (hud.delivered / hud.elapsed) * 60 : 0;
+
+  /*
+   * The traffic layer unmounts the simulation, and `publishHud` lives inside
+   * it — so every live counter below stops being updated rather than going to
+   * zero. Everything that reads one has to say so.
+   */
+  /*
+   * Attribution, which is a licence condition rather than a decoration.
+   *
+   * Every road, building and shop on an imported map is OpenStreetMap data, and
+   * ODbL requires the credit to be visible wherever that data is shown — so it
+   * goes on the map itself, not in a README nobody deploying this will read.
+   *
+   * Shown only for the maps it applies to. The hand-authored junctions owe
+   * OpenStreetMap nothing, and crediting it under a level somebody drew by hand
+   * is its own small inaccuracy.
+   */
+  const osmDerived = /^(osm_|world_)/.test(world.level.id);
+
+  const trafficOff = !hud.layers.traffic;
+  const trafficTitle = trafficOff
+    ? "Traffic is off. The cars are still on the map, paused — turn it back on in the layers menu"
+    : undefined;
   // Sun or moon, on the same threshold the street lighting uses.
   const isDark = hud.timeOfDay < 6.4 || hud.timeOfDay > 20.4;
 
@@ -219,6 +242,24 @@ export function Hud({
     <>
       <div className={"drain" + (over ? " is-active" : "")} />
 
+      {/*
+        Quiet, but never hidden. ODbL asks that the credit be as visible as the
+        data it covers; it does not ask for it to be loud, and a map is spoiled
+        by furniture. `rel="noreferrer"` because this is the only outbound link
+        in the app and there is no reason to announce where it was clicked from.
+      */}
+      {osmDerived && (
+        <a
+          className="osm-credit"
+          href="https://www.openstreetmap.org/copyright"
+          target="_blank"
+          rel="noreferrer"
+          title="Map data from OpenStreetMap, used under the Open Database Licence"
+        >
+          © OpenStreetMap contributors
+        </a>
+      )}
+
       {/* What the keys do while the camera is yours, since the mouse is captured. */}
       {hud.layers.walkCamera && (
         <div className="walk-badge">
@@ -327,16 +368,23 @@ export function Hud({
 
             {sandbox ? (
               <>
-                <div className="dock-stat">
-                  <b>{hud.active}</b>
-                  <span>on map</span>
+                {/*
+                  With the traffic layer off nothing publishes these any more,
+                  so the last values would sit here indefinitely — "59 on map"
+                  over a map with no cars on it, which is worse than no number
+                  at all. Dashed rather than zeroed: the cars have not gone
+                  anywhere, they are paused, and zero would be its own lie.
+                */}
+                <div className="dock-stat" title={trafficTitle}>
+                  <b>{trafficOff ? "—" : hud.active}</b>
+                  <span>{trafficOff ? "traffic off" : "on map"}</span>
                 </div>
-                <div className="dock-stat">
-                  <b>{hud.networkDelay.toFixed(0)}s</b>
+                <div className="dock-stat" title={trafficTitle}>
+                  <b>{trafficOff ? "—" : `${hud.networkDelay.toFixed(0)}s`}</b>
                   <span>avg delay</span>
                 </div>
-                <div className="dock-stat">
-                  <b>{throughput.toFixed(0)}</b>
+                <div className="dock-stat" title={trafficTitle}>
+                  <b>{trafficOff ? "—" : throughput.toFixed(0)}</b>
                   <span>cars/min</span>
                 </div>
                 <label className="dock-demand" title="Cars arriving per second">
@@ -378,9 +426,9 @@ export function Hud({
                 )}
               </>
             ) : (
-              <div className="dock-stat">
-                <b>{hud.active}</b>
-                <span>on map</span>
+              <div className="dock-stat" title={trafficTitle}>
+                <b>{trafficOff ? "—" : hud.active}</b>
+                <span>{trafficOff ? "traffic off" : "on map"}</span>
               </div>
             )}
           </>
