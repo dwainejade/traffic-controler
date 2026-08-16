@@ -4,8 +4,10 @@ import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import { useHud } from "../ui/hudStore";
+import { typing } from "../ui/typing";
 import type { LevelDef } from "../sim/types";
 import { MAX_ZOOM, MIN_DISTANCE, maxDistance, minZoom } from "./cameraLimits";
+import { setViewCentre } from "./viewCentre";
 
 /**
  * Orbit controls, deliberately fenced in. The player gets to look around and
@@ -16,8 +18,8 @@ import { MAX_ZOOM, MIN_DISTANCE, maxDistance, minZoom } from "./cameraLimits";
  */
 export function Controls({ level }: { level: LevelDef }) {
   const ref = useRef<OrbitControlsImpl>(null);
-  const focus = useHud((s) => s.focus);
   const cinematic = useHud((s) => s.layers.cinematicCamera);
+  const walk = useHud((s) => s.layers.walkCamera);
   const flyTo = useRef<{ target: THREE.Vector3; t: number } | null>(null);
 
   /*
@@ -235,16 +237,6 @@ export function Controls({ level }: { level: LevelDef }) {
       const k = e.key.toLowerCase();
       return k === "w" || k === "a" || k === "s" || k === "d";
     };
-    // Don't steal keystrokes from the HUD's inputs.
-    const typing = () => {
-      const el = document.activeElement;
-      return (
-        el instanceof HTMLInputElement ||
-        el instanceof HTMLTextAreaElement ||
-        (el instanceof HTMLElement && el.isContentEditable)
-      );
-    };
-
     const down = (e: KeyboardEvent) => {
       if (!interesting(e) || e.metaKey || e.ctrlKey || e.altKey || typing())
         return;
@@ -262,17 +254,6 @@ export function Controls({ level }: { level: LevelDef }) {
       window.removeEventListener("blur", blur);
     };
   }, []);
-
-  // Fly the camera to a junction when the congestion list is clicked.
-  useEffect(() => {
-    if (!focus) return;
-    const node = level.nodes.find((n) => n.id === focus.id);
-    if (!node) return;
-    flyTo.current = {
-      target: new THREE.Vector3(node.pos[0], 0, node.pos[1]),
-      t: 0,
-    };
-  }, [focus, level]);
 
   const panAxis = useRef(new THREE.Vector3());
 
@@ -313,13 +294,16 @@ export function Controls({ level }: { level: LevelDef }) {
   };
 
   useFrame((_, delta) => {
-    // CinematicCamera owns the camera transform directly while active, and
-    // OrbitControls is unmounted below, so this ref is already null then —
-    // but bail explicitly rather than relying on mount timing.
-    if (cinematic) return;
+    // CinematicCamera and WalkCamera own the camera transform directly while
+    // active, and OrbitControls is unmounted below, so this ref is already null
+    // then — but bail explicitly rather than relying on mount timing.
+    if (cinematic || walk) return;
 
     const controls = ref.current;
     if (!controls) return;
+
+    // What the map is centred on, for whoever takes the camera next.
+    setViewCentre(controls.target.x, controls.target.z);
 
     if (controls.enabled && keys.current.size) {
       const k = keys.current;
@@ -351,9 +335,9 @@ export function Controls({ level }: { level: LevelDef }) {
    * target at the map origin, which can leave the camera outside
    * minDistance/maxPolarAngle and snap on its very first update.
    *
-   * Recomputed only when `cinematic` itself changes — the moment that
-   * matters is true -> false, right as CinematicCamera has left the camera
-   * mid-flight.
+   * Recomputed only when `cinematic` or `walk` itself changes — the moment
+   * that matters is true -> false, right as CinematicCamera has left the
+   * camera mid-flight, or WalkCamera has left it standing in the street.
    */
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const initialTarget = useMemo(() => {
@@ -371,14 +355,14 @@ export function Controls({ level }: { level: LevelDef }) {
       panLimit,
     );
     return new THREE.Vector3(x, 0, z);
-  }, [cinematic]);
+  }, [cinematic, walk]);
 
-  // Unmounted rather than merely disabled while cinematic is active: three's
-  // OrbitControls recomputes the camera transform from its own target and
-  // spherical state every frame it's mounted, which fights CinematicCamera
-  // writing to camera.position/lookAt directly. See DevHandle.lookAt in
-  // Scene.tsx for the same constraint on a smaller scale.
-  if (cinematic) return null;
+  // Unmounted rather than merely disabled while another camera mode is active:
+  // three's OrbitControls recomputes the camera transform from its own target
+  // and spherical state every frame it's mounted, which fights CinematicCamera
+  // and WalkCamera writing to camera.position/rotation directly. See
+  // DevHandle.lookAt in Scene.tsx for the same constraint on a smaller scale.
+  if (cinematic || walk) return null;
 
   return (
     <OrbitControls

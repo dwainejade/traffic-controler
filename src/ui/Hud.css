@@ -166,6 +166,7 @@
     opacity: 0;
     transform: translateY(10px);
   }
+
 }
 
 .result-card {
@@ -232,58 +233,6 @@
 .phase:disabled {
   opacity: 0.45;
   cursor: default;
-}
-
-.panel-junctions {
-  top: 190px;
-  left: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 8px;
-}
-
-.jchip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 9px;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-}
-
-.jchip:hover {
-  background: rgba(120, 130, 145, 0.12);
-}
-
-.jchip.is-selected {
-  background: rgba(44, 48, 54, 0.1);
-  box-shadow: inset 0 0 0 1.5px rgba(44, 48, 54, 0.35);
-}
-
-.jchip-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.jchip-id {
-  flex: 1;
-  text-align: left;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Waiting-car count: the number that tells you where to go next. */
-.jchip-queue {
-  min-width: 20px;
-  text-align: right;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-  color: #6b7078;
 }
 
 .phase-node {
@@ -354,6 +303,28 @@
   text-transform: uppercase;
 }
 
+/*
+ * Centred at the top, out of the way of every corner panel: while the pointer
+ * is locked the mouse can't reach the HUD, so this is the only place the
+ * walker's controls are written down.
+ */
+.walk-badge {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 32, 0.72);
+  color: #f2f6f8;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 .panel-speed {
   align-items: center;
 }
@@ -385,20 +356,6 @@
   font-size: 12px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
-}
-
-.hotspot-head {
-  padding: 2px 9px 6px;
-  font-size: 10px;
-  font-weight: 700;
-  color: #6b7078;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-/* A queue this long is the thing you should go and look at. */
-.jchip-queue.is-hot {
-  color: #c2410c;
 }
 
 /* --- The dock ------------------------------------------------------------- */
@@ -597,6 +554,7 @@
   from {
     opacity: 0;
   }
+
 }
 
 .sheet {
@@ -626,6 +584,7 @@
   from {
     transform: translateY(100%);
   }
+
 }
 
 .sheet-grip {
@@ -645,12 +604,6 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
-}
-
-.sheet-junctions {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
 }
 
 .sheet-hint {
@@ -728,8 +681,5 @@
     height: 28px;
   }
 
-  .jchip,
-  .layers-row {
-    min-height: 38px;
-  }
 }
+

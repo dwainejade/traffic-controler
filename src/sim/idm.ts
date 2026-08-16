@@ -34,25 +34,71 @@ export const IDM = {
   delta: 4,
 } as const;
 
-/** Hard ceiling on braking, used when a gap has already been violated. */
-const MAX_BRAKE = -9;
+/**
+ * Hard ceiling on braking, used when a gap has already been violated.
+ *
+ * Exported because the reaction lag in `world.ts` must recognise a genuine
+ * emergency and skip itself: lagging a stamp on the brakes is how a following
+ * model that is otherwise sound produces pileups.
+ */
+export const MAX_BRAKE = -9;
 
 /**
- * How hard a particular vehicle accelerates and brakes.
+ * How this vehicle and this driver follow the one in front.
  *
- * A loaded box truck does not pull away like a hatchback, and with mixed traffic
- * that difference is the whole point of having trucks at all: one of them at the
- * head of a queue costs the junction real capacity. Absent, the car figures
- * above are used, so every existing call site is unchanged.
+ * `a`/`b` are the vehicle: a loaded box truck does not pull away like a
+ * hatchback, and with mixed traffic that difference is the whole point of having
+ * trucks at all — one of them at the head of a queue costs the junction real
+ * capacity. `T`/`s0` are the driver: how close they sit behind somebody moving,
+ * and how close they stop behind somebody stationary. See `drivers.ts`.
+ *
+ * All four default to the figures above, so every existing call site is
+ * unchanged.
  */
-export type DrivePower = { a: number; b: number };
+export type DrivePower = { a: number; b: number; T?: number; s0?: number };
+
+/**
+ * Seconds for a vehicle now doing `v` to cover `distance`, accelerating at `a`
+ * up to `v0` and holding it.
+ *
+ * Exists for gap acceptance. "When will that oncoming car get here" cannot be
+ * answered with `distance / v`, because the case that matters most is the one
+ * where `v` is zero: a car at the head of its own queue on a fresh green is
+ * doing nothing at all and is about to do 25mph, and dividing by its present
+ * speed says it will never arrive. The previous answer was to floor the speed
+ * at three quarters of free flow, which fixed that case by breaking the
+ * opposite one — a genuinely stationary queue was scored as bearing down at
+ * 8.4 m/s, and left turns yielded to traffic that was not moving.
+ *
+ * Integrating the launch is simply the correct answer to both.
+ */
+export function timeToCover(
+  distance: number,
+  v: number,
+  a: number,
+  v0: number,
+): number {
+  if (distance <= 0) return 0;
+  if (a <= 0) return v > 0 ? distance / v : Infinity;
+
+  // Distance it would take to wind up to its desired speed from here.
+  const toTopSpeed = v < v0 ? (v0 * v0 - v * v) / (2 * a) : 0;
+
+  // Still accelerating when it arrives: solve d = v·t + a·t²/2 for t.
+  if (toTopSpeed >= distance) {
+    return (Math.sqrt(v * v + 2 * a * distance) - v) / a;
+  }
+
+  // Winds up, then runs the remainder at its desired speed.
+  return (v0 - v) / a + (distance - toTopSpeed) / v0;
+}
 
 /**
  * @param v       this car's speed
  * @param gap     clear distance to the leader's rear bumper (may be negative)
  * @param leaderV leader's speed; 0 for a stop line
  * @param v0      desired speed, overridable for slow movements like tight turns
- * @param power   acceleration and braking for this vehicle; defaults to a car's
+ * @param power   how this vehicle and driver follow; defaults to a car's
  */
 export function idmAccel(
   v: number,
@@ -66,10 +112,12 @@ export function idmAccel(
   if (gap === Infinity) return power.a * free;
   if (gap <= 0.05) return MAX_BRAKE;
 
+  const s0 = power.s0 ?? IDM.s0;
+  const T = power.T ?? IDM.T;
+
   const dv = v - leaderV;
   const sStar =
-    IDM.s0 +
-    Math.max(0, v * IDM.T + (v * dv) / (2 * Math.sqrt(power.a * power.b)));
+    s0 + Math.max(0, v * T + (v * dv) / (2 * Math.sqrt(power.a * power.b)));
 
   const accel = power.a * (free - (sStar / gap) * (sStar / gap));
   return Math.max(accel, MAX_BRAKE);

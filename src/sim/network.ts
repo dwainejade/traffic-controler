@@ -71,6 +71,20 @@ export type Lane = {
   access: "all" | "bus";
   fromNode: NodeId | null;
   toNode: NodeId | null;
+  /**
+   * The sibling lane one step toward the centreline, and one step toward the
+   * kerb. Road lanes only; `null` at either edge of the carriageway.
+   *
+   * Precomputed because the alternative is a scan over every lane in the network
+   * to answer "what is beside me", asked by every car on every step. `index`
+   * counts outward from the centreline, so `left` is `index - 1`.
+   *
+   * These say only that a lane is *adjacent*, never that a change into it is
+   * allowed: the bus lane is somebody's `right`, and general traffic may not go
+   * there. `access` is checked at the point of use.
+   */
+  left: LaneId | null;
+  right: LaneId | null;
   /** Car ids currently on this lane, ordered front-most (largest s) first. */
   cars: number[];
 };
@@ -171,8 +185,8 @@ function classifyTurn(from: Vec2, to: Vec2): TurnKind | null {
 
 export function buildNetwork(level: LevelDef): Network {
   const lanes: Lane[] = [];
-  const addLane = (l: Omit<Lane, "id" | "cars">): Lane => {
-    const lane: Lane = { ...l, id: lanes.length, cars: [] };
+  const addLane = (l: Omit<Lane, "id" | "cars" | "left" | "right">): Lane => {
+    const lane: Lane = { ...l, id: lanes.length, cars: [], left: null, right: null };
     lanes.push(lane);
     return lane;
   };
@@ -244,14 +258,67 @@ export function buildNetwork(level: LevelDef): Network {
     }
   }
 
+  /*
+   * --- Lane adjacency. Done here, once every road lane exists and before any
+   * connector does, because connectors are never siblings of anything: a lane
+   * change happens on a link, never inside a junction box, where two crossing
+   * movements off one arm are a conflict the phase builder cannot separate.
+   *
+   * A lane's *direction* is the (road, fromNode, toNode) triple, not the road
+   * alone. On a two-way road the opposing direction carries the same `roadId`
+   * and the same `index` values while running the other way, so keying on the
+   * road would happily pair a lane with one coming at it head-on.
+   */
+  const byDirection = new Map<string, Lane[]>();
+  for (const lane of lanes) {
+    if (lane.kind !== "road") continue;
+    const key = `${lane.roadId}:${lane.fromNode}:${lane.toNode}`;
+    const group = byDirection.get(key);
+    if (group === undefined) byDirection.set(key, [lane]);
+    else group.push(lane);
+  }
+  for (const group of byDirection.values()) {
+    const byIndex = new Map(group.map((l) => [l.index, l.id]));
+    for (const lane of group) {
+      lane.left = byIndex.get(lane.index - 1) ?? null;
+      lane.right = byIndex.get(lane.index + 1) ?? null;
+    }
+  }
+
+  /*
+   * Which roads meet each node, and which lanes belong to each road.
+   *
+   * Both are one pass here to replace a scan inside the arm loop below. That
+   * loop runs once per arm on the map — about four per junction — and used to
+   * walk every road to find its own, then walk every lane on the map twice to
+   * collect the lane ids at each end. On a city-sized grid that came to a few
+   * hundred million comparisons and was the bulk of the time spent building the
+   * network.
+   */
+  const roadsByNode = new Map<NodeId, RoadDef[]>();
+  for (const road of level.roads) {
+    for (const id of road.from === road.to ? [road.from] : [road.from, road.to]) {
+      const list = roadsByNode.get(id);
+      if (list) list.push(road);
+      else roadsByNode.set(id, [road]);
+    }
+  }
+
+  const lanesByRoad = new Map<string, Lane[]>();
+  for (const lane of lanes) {
+    if (lane.roadId === null) continue;
+    const list = lanesByRoad.get(lane.roadId);
+    if (list) list.push(lane);
+    else lanesByRoad.set(lane.roadId, [lane]);
+  }
+
   // --- Arms: group the lanes meeting each junction by road.
   const armsByJunction = new Map<NodeId, Arm[]>();
   for (const node of level.nodes) {
     if (node.kind !== "junction") continue;
 
     const arms: Arm[] = [];
-    for (const road of level.roads) {
-      if (road.from !== node.id && road.to !== node.id) continue;
+    for (const road of roadsByNode.get(node.id) ?? []) {
 
       /*
        * The arm's outward direction is the road's *tangent* where it meets the
@@ -269,12 +336,12 @@ export function buildNetwork(level: LevelDef): Network {
       arms.push({
         roadId: road.id,
         out: { x: tangent.x * sign, z: tangent.z * sign },
-        inbound: lanes
-          .filter((l) => l.roadId === road.id && l.toNode === node.id)
+        inbound: (lanesByRoad.get(road.id) ?? [])
+          .filter((l) => l.toNode === node.id)
           .sort((p, q) => p.index - q.index)
           .map((l) => l.id),
-        outbound: lanes
-          .filter((l) => l.roadId === road.id && l.fromNode === node.id)
+        outbound: (lanesByRoad.get(road.id) ?? [])
+          .filter((l) => l.fromNode === node.id)
           .sort((p, q) => p.index - q.index)
           .map((l) => l.id),
         connectorIds: [],

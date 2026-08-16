@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { LevelDef } from "../sim/types";
 import { LEVELS } from "../levels";
-import { removeArea, useLevels } from "../levels/registry";
+import { addTransientLevel, removeArea, useLevels } from "../levels/registry";
+import { benchLevel } from "../levels/bench";
 import { ImportForm } from "./ImportForm";
 import { Sheet } from "./Sheet";
 import { useIsMobile } from "./useIsMobile";
@@ -61,6 +62,9 @@ function SavedRow({
   );
 }
 
+/** Half-extents offered as one-click benchmarks, in metres. */
+const BENCH_SIZES = [600, 1000, 1500, 2000, 2500];
+
 export function LevelSheet({
   current,
   onPick,
@@ -70,6 +74,7 @@ export function LevelSheet({
 }) {
   const mobile = useIsMobile();
   const saved = useLevels((s) => s.saved);
+  const bench = useLevels((s) => s.bench);
   const [open, setOpen] = useState(false);
 
   const pick = (id: string) => {
@@ -116,6 +121,45 @@ export function LevelSheet({
           />
         ))}
       </div>
+
+      {/*
+        Benchmark cities, dev only. Sizes are offered rather than listed,
+        because building one is real work — a 25 km² grid is about half a second
+        of geometry — and nothing should pay that on every boot to populate a
+        menu. Clicking a size builds it, adds it to the list and switches to it;
+        clicking it again is free, because `benchLevel` hands back the same
+        object it built the first time.
+      */}
+      {import.meta.env.DEV && (
+        <div className="level-group">
+          <div className="level-head">Benchmarks</div>
+          <div className="bench-sizes">
+            {BENCH_SIZES.map((half) => (
+              <button
+                key={half}
+                className="bench-size"
+                onClick={() => {
+                  const level = benchLevel(half);
+                  addTransientLevel(level);
+                  pick(level.id);
+                }}
+              >
+                {(half * 2) / 1000}km
+              </button>
+            ))}
+          </div>
+          {bench.map((l) => (
+            <div key={l.id} className={"level-row" + (l.id === current.id ? " is-current" : "")}>
+              <button className="level-pick" onClick={() => pick(l.id)}>
+                <span className="level-name">{l.name}</span>
+                <span className="level-detail">
+                  {l.nodes.filter((n) => n.kind === "junction").length} junctions
+                </span>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="level-group">
         <div className="level-head">Import an area</div>

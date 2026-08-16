@@ -87,8 +87,46 @@ export function buildConflicts(net: Network): ConflictMap {
   for (const [junctionId, connectorIds] of net.connectorsByJunction) {
     const points: ConflictPoint[] = [];
 
+    /*
+     * Bounding box of every connector through this junction, so pairs that
+     * cannot possibly conflict are thrown out before any geometry runs.
+     *
+     * Exactly equivalent rather than approximate: a pair only survives below if
+     * its closest approach comes within `CONFLICT_CLEARANCE`, and two paths
+     * whose boxes are further apart than that cannot get closer than that. A
+     * junction's connectors are mostly nowhere near each other — the two right
+     * turns on opposite corners never meet — and each surviving pair otherwise
+     * costs a segment-by-segment crossing test followed by two closest-approach
+     * walks.
+     */
+    const boxes = connectorIds.map((id) => {
+      const pts = net.lanes[id].pts;
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minZ = Infinity;
+      let maxZ = -Infinity;
+      for (let p = 0; p < pts.length; p += 2) {
+        if (pts[p] < minX) minX = pts[p];
+        if (pts[p] > maxX) maxX = pts[p];
+        if (pts[p + 1] < minZ) minZ = pts[p + 1];
+        if (pts[p + 1] > maxZ) maxZ = pts[p + 1];
+      }
+      return { minX, maxX, minZ, maxZ };
+    });
+
     for (let i = 0; i < connectorIds.length; i++) {
       for (let k = i + 1; k < connectorIds.length; k++) {
+        const ba = boxes[i];
+        const bb = boxes[k];
+        if (
+          ba.minX - bb.maxX > CONFLICT_CLEARANCE ||
+          bb.minX - ba.maxX > CONFLICT_CLEARANCE ||
+          ba.minZ - bb.maxZ > CONFLICT_CLEARANCE ||
+          bb.minZ - ba.maxZ > CONFLICT_CLEARANCE
+        ) {
+          continue;
+        }
+
         const a = net.lanes[connectorIds[i]];
         const b = net.lanes[connectorIds[k]];
 

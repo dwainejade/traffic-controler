@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useFrame, useThree } from "@react-three/fiber";
+import { useFrame } from "@react-three/fiber";
 import { Text } from "@react-three/drei";
 import * as THREE from "three";
 import { PALETTE } from "../art/palette";
@@ -10,6 +10,7 @@ import {
   junctionArms,
   type Arm,
 } from "./junctionShape";
+import { useTextAnchor } from "./textBudget";
 
 /**
  * Street name signs, standing on the corners.
@@ -240,11 +241,7 @@ export function StreetSigns({ level }: { level: LevelDef }) {
  * re-render per frame would cost more than the text it is trying to save.
  */
 function useNearbyBlades(blades: Blade[]): Blade[] {
-  const camera = useThree((s) => s.camera);
-  const controls = useThree(
-    (s) => s.controls as unknown as { target: THREE.Vector3 } | null,
-  );
-  const height = useThree((s) => s.size.height);
+  const anchor = useTextAnchor();
   const [visible, setVisible] = useState<Blade[]>([]);
   const timer = useRef(0);
   const signature = useRef("");
@@ -254,22 +251,10 @@ function useNearbyBlades(blades: Blade[]): Blade[] {
     if (timer.current < TEXT_INTERVAL) return;
     timer.current = 0;
 
-    // Pixels a metre at the target covers. An orthographic zoom is exactly
-    // that already; a perspective one has to be reconstructed from the frustum
-    // at the distance the player is actually looking.
-    let pixelsPerMetre = 0;
-    if (camera instanceof THREE.OrthographicCamera) {
-      pixelsPerMetre = camera.zoom;
-    } else if (camera instanceof THREE.PerspectiveCamera && controls) {
-      const distance = camera.position.distanceTo(controls.target);
-      const frustum =
-        2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * distance;
-      pixelsPerMetre = height / frustum;
-    }
+    const { x, z, pixelsPerMetre } = anchor();
 
     let next: Blade[] = [];
-    if (TEXT_SIZE * pixelsPerMetre >= MIN_TEXT_PIXELS && controls) {
-      const { x, z } = controls.target;
+    if (TEXT_SIZE * pixelsPerMetre >= MIN_TEXT_PIXELS) {
       next = blades
         .map((blade) => ({ blade, d: (blade.x - x) ** 2 + (blade.z - z) ** 2 }))
         .filter((e) => e.d < TEXT_RADIUS * TEXT_RADIUS)

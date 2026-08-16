@@ -2,7 +2,12 @@ import { World } from "../../sim/world";
 import { addArea, newAreaId, useLevels } from "../registry";
 import type { SavedArea } from "../store/areaDb";
 import { importOsm } from "./import";
-import { boxAround, fetchOverpass, OverpassError } from "./overpass";
+import {
+  boxAround,
+  fetchOverpassTiled,
+  OverpassError,
+  TILE_HALF_METRES,
+} from "./overpass";
 
 /**
  * Importing an area from inside the app: coordinates in, playable level out.
@@ -15,14 +20,48 @@ import { boxAround, fetchOverpass, OverpassError } from "./overpass";
 
 /** Half the square's side, in metres. */
 export const RADIUS_MIN = 100;
-export const RADIUS_MAX = 600;
+/**
+ * Six hundred metres until the renderer and the simulation could both carry a
+ * city. It is no longer either of them that sets this: 25 km² draws at over
+ * 150fps and simulates inside its frame budget, and what is left is the
+ * *import* — which past one Overpass tile is many round trips and minutes of
+ * waiting, and which compiles a level big enough to be worth thinking about
+ * before storing.
+ *
+ * 2500 gives a 5km square. That is 25 sub-box fetches at `TILE_HALF_METRES`,
+ * which is a long wait but a bounded one, and it is about the largest area
+ * anybody can usefully look at as one place.
+ */
+export const RADIUS_MAX = 2500;
 export const RADIUS_DEFAULT = 300;
-/** Past this it is slow enough to be worth warning about first. */
-export const RADIUS_WARN = 450;
+/**
+ * Past this the import stops being one round trip and becomes several, so it is
+ * worth saying so before somebody starts a five-minute wait by accident.
+ */
+export const RADIUS_WARN = TILE_HALF_METRES;
+
+/**
+ * Roughly how long an import of this radius takes, in minutes, for the warning
+ * line. One round trip per tile, and the tiles are paced apart on purpose —
+ * see `TILE_GAP_MS`. Deliberately pessimistic: a wait that finishes early is a
+ * pleasant surprise and a wait that overruns its estimate is a bug report.
+ */
+export function estimatedMinutes(radius: number): number {
+  const perSide = Math.max(1, Math.ceil(radius / TILE_HALF_METRES));
+  return Math.max(1, Math.round((perSide * perSide * 20) / 60));
+}
 
 export type ImportPhase =
   | { kind: "idle" }
-  | { kind: "fetching"; endpoint: string; index: number; total: number; retry: boolean }
+  | {
+      kind: "fetching";
+      endpoint: string;
+      index: number;
+      total: number;
+      retry: boolean;
+      /** Which sub-box of how many, when the area needs more than one. */
+      tile?: { index: number; total: number };
+    }
   | { kind: "compiling" }
   | { kind: "checking" }
   | { kind: "saving" }
@@ -82,9 +121,19 @@ export async function importArea(
   // --- Fetch.
   let file;
   try {
-    file = await fetchOverpass(bbox, {
+    /*
+     * Tiled whatever the size: `fetchOverpassTiled` hands a single-tile box
+     * straight to the plain fetch, so the small imports that were working
+     * before take exactly the path they always did.
+     */
+    let tile: { index: number; total: number } | undefined;
+    file = await fetchOverpassTiled(bbox, {
       signal: opts.signal,
       onProgress: (p) => {
+        if (p.phase === "tile") {
+          tile = { index: p.index, total: p.total };
+          return;
+        }
         if (p.phase === "trying") {
           opts.onPhase?.({
             kind: "fetching",
@@ -92,6 +141,7 @@ export async function importArea(
             index: p.index,
             total: p.total,
             retry: p.retry,
+            tile,
           });
         }
       },
@@ -175,6 +225,18 @@ export async function importArea(
     savedAt: Date.now(),
     level,
   };
-  await addArea(area);
+  /*
+   * Everything above this point is recoverable by trying again; this is the
+   * step that can fail after minutes of fetching, so it says what went wrong
+   * rather than throwing a DOMException at the form.
+   */
+  try {
+    await addArea(area);
+  } catch (err) {
+    throw new ImportError(
+      "Built the map, but couldn't save it.",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
   return area;
 }

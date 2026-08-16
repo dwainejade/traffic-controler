@@ -199,6 +199,30 @@ export type BuildingFootprint = {
   tint: number
 }
 
+/**
+ * A business, as the sign over its door.
+ *
+ * Placed on the wall rather than at the point OSM gives, which is somewhere
+ * inside the building: a shop is a thing you read from the street. Everything
+ * here is presentational — the simulation never reads it, and no car knows a
+ * shop is there.
+ */
+export type Shopfront = {
+  /** Centre of the sign band on the street-facing wall, [x, z]. */
+  pos: [number, number]
+  /** Rotation about Y putting the sign's face along the wall, outward. */
+  angle: number
+  /** How much wall the sign has, metres. */
+  width: number
+  /** Sign band centre height, metres above ground. */
+  y: number
+  name: string
+  /** Palette key: a known chain, or the OSM category it falls back to. */
+  brand: string
+  /** `shop=*` or `amenity=*` value, for the fallback colour. */
+  category: string
+}
+
 export type LevelDef = {
   id: string
   name: string
@@ -215,6 +239,8 @@ export type LevelDef = {
    * and invented blocks beside them look exactly as wrong as they are.
    */
   footprints?: BuildingFootprint[]
+  /** Shop signage, where the source map knew what was in the buildings. */
+  shopfronts?: Shopfront[]
   /** Cars that must complete their route to clear the level. */
   quota: number
   /**
@@ -325,8 +351,59 @@ export function pavedWidth(road: RoadDef): number {
   return right - left
 }
 
+/**
+ * Lookups over a level's topology, built once and remembered.
+ *
+ * `nodeById` and `junctionSize` are the two most-called functions in the
+ * project, and both used to be linear scans — a `find` over every node and a
+ * `filter` over every road, per call. That is invisible on a crossroads and
+ * quadratic on a city: building the lane graph for a 25 km² grid spent 1.4
+ * seconds in them, which was 78% of the time to construct a `World` and most of
+ * the delay before a large map appeared at all.
+ *
+ * Keyed on the level object's identity, which is exactly the contract the level
+ * registry already documents and enforces — a `LevelDef` is pushed around, never
+ * rebuilt or spread into a copy. Nothing mutates `nodes` or `roads` after a
+ * level is assembled; the generators build them as local arrays first.
+ */
+type LevelIndex = {
+  node: Map<NodeId, MapNode>
+  /** Junction box size at each node, zero where nothing is signalised. */
+  size: Map<NodeId, number>
+}
+
+const indexes = new WeakMap<LevelDef, LevelIndex>()
+
+function indexOf(level: LevelDef): LevelIndex {
+  const cached = indexes.get(level)
+  if (cached) return cached
+
+  const node = new Map<NodeId, MapNode>()
+  for (const n of level.nodes) node.set(n.id, n)
+
+  // Widest paved road meeting each node, accumulated in one pass over the roads
+  // rather than one pass per node.
+  const widest = new Map<NodeId, number>()
+  for (const road of level.roads) {
+    const w = pavedWidth(road)
+    for (const id of [road.from, road.to]) {
+      const best = widest.get(id)
+      if (best === undefined || w > best) widest.set(id, w)
+    }
+  }
+
+  const size = new Map<NodeId, number>()
+  for (const [id, w] of widest) {
+    size.set(id, Math.max(w + JUNCTION_MARGIN, MIN_JUNCTION_SIZE))
+  }
+
+  const built = { node, size }
+  indexes.set(level, built)
+  return built
+}
+
 export function nodeById(level: LevelDef, id: NodeId): MapNode {
-  const n = level.nodes.find((x) => x.id === id)
+  const n = indexOf(level).node.get(id)
   if (!n) throw new Error(`Unknown node "${id}" in level "${level.id}"`)
   return n
 }
@@ -388,9 +465,5 @@ export const MIN_JUNCTION_SIZE = 16
  * parking strips and bus lanes run visibly past its corners into the crossing.
  */
 export function junctionSize(level: LevelDef, id: NodeId): number {
-  const widths = level.roads
-    .filter((r) => r.from === id || r.to === id)
-    .map(pavedWidth)
-  if (widths.length === 0) return 0
-  return Math.max(Math.max(...widths) + JUNCTION_MARGIN, MIN_JUNCTION_SIZE)
+  return indexOf(level).size.get(id) ?? 0
 }

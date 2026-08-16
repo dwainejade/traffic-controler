@@ -3,6 +3,8 @@ import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import type { LevelDef } from "../sim/types";
 import { toggleLayer } from "../ui/hudStore";
+import { typing } from "../ui/typing";
+import { setViewCentre } from "./viewCentre";
 
 type Path = {
   /** Point on the map boundary where the flight begins, y = 0. */
@@ -55,15 +57,6 @@ function pickPath(half: number): Path {
   const speed = THREE.MathUtils.clamp(half / 12, 1, 10);
 
   return { start, dir, length, height, lookAhead: height * 2.5, speed };
-}
-
-function typing(): boolean {
-  const el = document.activeElement;
-  return (
-    el instanceof HTMLInputElement ||
-    el instanceof HTMLTextAreaElement ||
-    (el instanceof HTMLElement && el.isContentEditable)
-  );
 }
 
 /**
@@ -135,6 +128,9 @@ export function CinematicCamera({ level }: { level: LevelDef }) {
       z + p.dir.z * p.lookAhead,
     );
     camera.lookAt(lookTarget.current);
+
+    // Where the flyover is pointed, so walk mode can land there if you cut in.
+    setViewCentre(lookTarget.current.x, lookTarget.current.z);
   });
 
   return null;

@@ -39,6 +39,7 @@ export function Daylight({ level, world }: { level: LevelDef; world: World }) {
   } | null;
 
   const cycle = useHud((s) => s.layers.daynight);
+  const walk = useHud((s) => s.layers.walkCamera);
 
   const sample = useMemo(() => emptyDaylight(), []);
   const background = useMemo(() => new THREE.Color(), []);
@@ -95,9 +96,18 @@ export function Daylight({ level, world }: { level: LevelDef; world: World }) {
      * which is the depth cue that was wanted in the first place.
      */
     const target = controls?.target;
+    /*
+     * How far the eye is working, which is what the fog is sized against.
+     * Orbiting, that is the distance to what you are looking at. Walking, the
+     * camera is 1.7m from the origin and that fallback would put the far plane
+     * at the end of the street, whiting out the whole view — so use the map's
+     * own scale, the ground-level equivalent of "as far as you can see".
+     */
     const distance = target
       ? camera.position.distanceTo(target)
-      : camera.position.length();
+      : walk
+        ? level.half
+        : camera.position.length();
     const span = level.half * 0.5;
     fog.color.copy(sample.air);
     // Thick air starts a little closer to the camera as well as ending sooner.

@@ -3,7 +3,7 @@ import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { INDICATOR, VEHICLE_COLORS } from "../art/palette";
 import { SKY } from "../art/daylight";
-import { VEHICLE, type World } from "../sim/world";
+import { FIXED_DT, VEHICLE, type World } from "../sim/world";
 import {
   UNIT_PLANE,
   blobTexture,
@@ -15,9 +15,9 @@ import {
 import { LAYER } from "./layers";
 import { useGlow } from "./glow";
 import { publishHud, useHud } from "../ui/hudStore";
+import { viewCentre } from "./viewCentre";
+import { simRadiusFor } from "../sim/region";
 
-/** Simulation runs at a fixed 60 Hz of simulated time, whatever the render rate. */
-const FIXED_DT = 1 / 120;
 /** Never simulate more than this much wall time in one frame after a stall. */
 const MAX_CATCHUP = 0.25;
 /**
@@ -45,6 +45,45 @@ const MAX_TRUCKS = 300;
 const MAX_BUSES = 200;
 
 const HUD_INTERVAL = 1 / 6;
+
+/**
+ * Radius of ground the camera can currently see, near enough.
+ *
+ * Only ever has to be an over-estimate: too large simulates a little more than
+ * is on screen, too small deletes cars somebody can see. The margin covers the
+ * 55° tilt, which lands a circle on screen as an ellipse stretched along the
+ * view direction.
+ */
+function viewRadius(
+  camera: THREE.Camera,
+  width: number,
+  height: number,
+): number {
+  if (camera instanceof THREE.OrthographicCamera) {
+    const halfW = width / 2 / camera.zoom;
+    const halfH = height / 2 / camera.zoom;
+    return Math.hypot(halfW, halfH) * TILT_MARGIN;
+  }
+
+  if (camera instanceof THREE.PerspectiveCamera) {
+    /*
+     * How much a perspective camera sees is how far away it is, so measure that
+     * against the point it is looking at rather than inferring it from height.
+     * That works for the orbiting camera and the walker alike: orbiting, the
+     * distance is hundreds of metres and the region covers the framing; standing
+     * in the street it is a few metres and the region falls to its floor.
+     */
+    const distance = Math.max(camera.position.distanceTo(viewCentre.point), 1);
+    const halfH = distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+    const halfW = halfH * (width / Math.max(height, 1));
+    return Math.hypot(halfW, halfH) * TILT_MARGIN;
+  }
+
+  return 0;
+}
+
+/** Slack over the half-diagonal, for the tilt and for being wrong. */
+const TILT_MARGIN = 1.3;
 
 /** Indicators flash at roughly 1.5 Hz, as real ones do. */
 const BLINK_HZ = 1.5;
@@ -88,6 +127,30 @@ const LAMPS_ON = 0.08;
 const HEADLAMP = "#FFF4DA";
 const TAILLAMP = "#FF3A2E";
 
+/**
+ * Brake lights.
+ *
+ * A separate mesh from the tail lamps rather than a brighter variant of them,
+ * because the two are on at different times: tail lamps are on because it is
+ * dark, brake lights are on because the driver is slowing, and in daylight only
+ * the second of those exists. Sharing one mesh would mean either no brake lights
+ * before dusk or tail lamps burning at noon.
+ *
+ * Worth the extra draw call for what it shows. Braking is the one thing a car
+ * does that the flow analysis cares about and the eye cannot otherwise see:
+ * a wave running backwards up a queue is invisible in a field of moving boxes
+ * and unmistakable as a ripple of red.
+ */
+const BRAKELAMP = "#FF1408";
+/** Slightly larger than the tail lamp it sits on, so it reads as lit, not moved. */
+const BRAKELAMP_GEOM = new THREE.BoxGeometry(0.42, 0.3, 0.26);
+/**
+ * Deceleration at which the lights come on, m/s^2. Low, but not zero: IDM is
+ * always making small corrections, and a threshold at zero has every car on the
+ * map flickering.
+ */
+const BRAKING = -0.6;
+
 export function Simulation({ world }: { world: World }) {
   const carBodies = useRef<THREE.InstancedMesh>(null);
   const truckBodies = useRef<THREE.InstancedMesh>(null);
@@ -96,6 +159,7 @@ export function Simulation({ world }: { world: World }) {
   const blinkers = useRef<THREE.InstancedMesh>(null);
   const heads = useRef<THREE.InstancedMesh>(null);
   const tails = useRef<THREE.InstancedMesh>(null);
+  const brakes = useRef<THREE.InstancedMesh>(null);
   const beams = useRef<THREE.InstancedMesh>(null);
 
   /*
@@ -105,6 +169,7 @@ export function Simulation({ world }: { world: World }) {
    */
   useGlow(heads);
   useGlow(tails);
+  useGlow(brakes);
   useGlow(blinkers);
 
   const accumulator = useRef(0);
@@ -117,10 +182,28 @@ export function Simulation({ world }: { world: World }) {
   const blob = useMemo(() => blobTexture(), []);
   const glow = useMemo(() => glowTexture(), []);
 
-  useFrame((_, delta) => {
+  useFrame((state, delta) => {
     if (import.meta.env.DEV) {
       (globalThis as unknown as { simWorld: World }).simWorld = world;
     }
+
+    /*
+     * Confine the simulation to what is being looked at.
+     *
+     * `setRegion` decides for itself whether that is worth doing: a radius that
+     * covers the whole map turns the clipping off, so every level small enough
+     * to fit on screen keeps simulating in full and nothing here has to know
+     * which levels those are.
+     */
+    world.setRegion(
+      viewCentre.point.x,
+      viewCentre.point.z,
+      simRadiusFor(
+        viewRadius(state.camera, state.size.width, state.size.height),
+        speed,
+      ),
+    );
+
     // --- Fixed-timestep simulation, scaled by the player's time multiplier.
     // The step size never changes; only how many of them a frame consumes, so
     // the physics stay identical whether you watch at 1x or 100x.
@@ -163,8 +246,12 @@ export function Simulation({ world }: { world: World }) {
       const head = heads.current;
       const tail = tails.current;
       const beam = beams.current;
+      const brake = brakes.current;
       const beamScale = new THREE.Vector3();
       let lit = 0;
+      // Its own counter: brake lights are not gated on darkness, so they do not
+      // share the night budget above.
+      let braking = 0;
 
       // One shared flash phase would look mechanical; offsetting per car keeps
       // indicators out of lockstep the way real ones drift apart.
@@ -254,6 +341,26 @@ export function Simulation({ world }: { world: World }) {
           lit += 2;
         }
 
+        /*
+         * Slowing, or already stopped in traffic. The second half matters as
+         * much as the first: a car held at a red has an acceleration of roughly
+         * zero, so decelerating alone would light the queue as it formed and
+         * then let it go dark — and a stationary queue with no brake lights is
+         * the thing that looks wrong.
+         */
+        if (brake && braking + 2 <= MAX_LAMPS && (car.accel < BRAKING || car.v < 0.15)) {
+          for (const side of [spec.width * 0.32, -spec.width * 0.32]) {
+            const along = -spec.length * LAMP_ALONG;
+            lampPos.set(
+              p.x + fx * along + fz * side,
+              spec.height * 0.44,
+              p.z + fz * along - fx * side,
+            );
+            lamp.compose(lampPos, q, one);
+            brake.setMatrixAt(braking++, lamp);
+          }
+        }
+
         if (!blink || lamps + 2 > MAX_INDICATORS) continue;
         const turn = world.turnIntent(car);
         if (!turn) continue;
@@ -298,6 +405,11 @@ export function Simulation({ world }: { world: World }) {
         blink.instanceMatrix.needsUpdate = true;
       }
 
+      if (brake) {
+        brake.count = braking;
+        brake.instanceMatrix.needsUpdate = true;
+      }
+
       for (const [mesh, count] of [
         [head, lit],
         [tail, lit],
@@ -325,23 +437,56 @@ export function Simulation({ world }: { world: World }) {
 
   return (
     <group>
-      <instancedMesh ref={shadows} args={[UNIT_PLANE, undefined, MAX_CARS]}>
+      {/*
+        `frustumCulled={false}` on every mesh below, and it is not an
+        optimisation being declined — it is the only correct setting for these.
+
+        Three.js frustum-tests an InstancedMesh against a bounding sphere it
+        computes once, on the first frame it is drawn, and never recomputes when
+        the instance matrices change. These matrices change every single frame.
+        On a map that opens with traffic already on it the stale sphere happens
+        to be large enough to keep covering the cars, and the bug stays hidden;
+        on a map that opens empty the sphere is computed over zero instances and
+        cached as radius -1, which intersects nothing, and no vehicle is ever
+        drawn again for the life of the level.
+
+        Culling was never worth anything here anyway: each of these is a single
+        draw call holding every vehicle on the map, so the test can only ever
+        take all of them or none.
+      */}
+      <instancedMesh ref={shadows} args={[UNIT_PLANE, undefined, MAX_CARS]} frustumCulled={false}>
         <meshBasicMaterial map={blob} transparent depthWrite={false} />
       </instancedMesh>
 
-      <instancedMesh ref={carBodies} args={[carGeom, undefined, MAX_CARS]} castShadow>
+      <instancedMesh
+        ref={carBodies}
+        args={[carGeom, undefined, MAX_CARS]}
+        castShadow
+        frustumCulled={false}
+      >
         <meshLambertMaterial vertexColors />
       </instancedMesh>
-      <instancedMesh ref={truckBodies} args={[truckGeom, undefined, MAX_TRUCKS]} castShadow>
+      <instancedMesh
+        ref={truckBodies}
+        args={[truckGeom, undefined, MAX_TRUCKS]}
+        castShadow
+        frustumCulled={false}
+      >
         <meshLambertMaterial vertexColors />
       </instancedMesh>
-      <instancedMesh ref={busBodies} args={[busGeom, undefined, MAX_BUSES]} castShadow>
+      <instancedMesh
+        ref={busBodies}
+        args={[busGeom, undefined, MAX_BUSES]}
+        castShadow
+        frustumCulled={false}
+      >
         <meshLambertMaterial vertexColors />
       </instancedMesh>
 
       {/* Headlights, tail lights, and the pool each pair throws on the road. */}
       <instancedMesh
         ref={beams}
+        frustumCulled={false}
         args={[UNIT_PLANE, undefined, MAX_CARS]}
         visible={false}
       >
@@ -357,6 +502,7 @@ export function Simulation({ world }: { world: World }) {
       </instancedMesh>
       <instancedMesh
         ref={heads}
+        frustumCulled={false}
         args={[HEADLAMP_GEOM, undefined, MAX_LAMPS]}
         visible={false}
       >
@@ -364,15 +510,26 @@ export function Simulation({ world }: { world: World }) {
       </instancedMesh>
       <instancedMesh
         ref={tails}
+        frustumCulled={false}
         args={[HEADLAMP_GEOM, undefined, MAX_LAMPS]}
         visible={false}
       >
         <meshBasicMaterial color={TAILLAMP} toneMapped={false} />
       </instancedMesh>
 
+      {/* Brake lights, on whenever a car is slowing — day or night. */}
+      <instancedMesh
+        ref={brakes}
+        frustumCulled={false}
+        args={[BRAKELAMP_GEOM, undefined, MAX_LAMPS]}
+      >
+        <meshBasicMaterial color={BRAKELAMP} toneMapped={false} />
+      </instancedMesh>
+
       {/* Turn indicators. Unlit amber so they read against any body colour. */}
       <instancedMesh
         ref={blinkers}
+        frustumCulled={false}
         args={[INDICATOR_GEOM, undefined, MAX_INDICATORS]}
       >
         <meshBasicMaterial color={INDICATOR} toneMapped={false} />

@@ -89,6 +89,22 @@ export function buildRouting(
 }
 
 /**
+ * Ceiling on how many movements a route may take, purely as a guard against a
+ * cycle in the cost table sending the walk round forever.
+ *
+ * It was 64, which is a generous crossing of a single junction's worth of map
+ * and nowhere near a crossing of a city. On a 5km grid an edge-to-edge route is
+ * several hundred lanes, so every long trip hit the guard and came back null —
+ * the spawn was silently discarded, and the network could not load past a few
+ * hundred cars however high demand went. The failure was invisible: no error,
+ * just a city that stayed empty.
+ *
+ * High enough now that only a genuine cycle reaches it. Each step is one array
+ * lookup, and this runs once per spawn, not per frame.
+ */
+const MAX_ROUTE_LANES = 2000;
+
+/**
  * Build a full lane-by-lane route from a starting lane to a destination.
  * Returns null when the destination is unreachable from here.
  */
@@ -107,7 +123,7 @@ export function routeTo(
   let guard = 0;
 
   while (net.lanes[lane].toNode !== dest) {
-    if (++guard > 64) return null;
+    if (++guard > MAX_ROUTE_LANES) return null;
 
     // Among the movements available, take one that gets strictly closer.
     let best: { connector: LaneId; target: LaneId }[] = [];

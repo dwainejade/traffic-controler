@@ -97,7 +97,22 @@ export async function saveArea(area: SavedArea): Promise<void> {
     throw new Error(`already storing ${MAX_AREAS} areas`);
   }
 
-  await promisify(store.put(area));
+  /*
+   * A city-sized level is tens of megabytes once structured-cloned, which is the
+   * first thing this store has held that a browser might refuse outright. The
+   * failure is a `QuotaExceededError` from `put`, and left raw it surfaces to
+   * the player as a stack trace over an import they just waited minutes for.
+   */
+  try {
+    await promisify(store.put(area));
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "QuotaExceededError") {
+      throw new Error(
+        "no room left in browser storage — delete a saved area, or import a smaller one",
+      );
+    }
+    throw err;
+  }
 }
 
 export async function deleteArea(id: string): Promise<void> {

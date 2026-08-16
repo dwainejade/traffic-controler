@@ -1,7 +1,9 @@
-import { useMemo } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { useFrame } from '@react-three/fiber'
 import { Text } from '@react-three/drei'
 import { polyLength, roadCentreline, samplePoly } from '../sim/centreline'
 import { roadEdges, type LevelDef, type RoadDef } from '../sim/types'
+import { useTextAnchor } from './textBudget'
 
 /**
  * Street names, lying flat on the carriageway the way a map draws them.
@@ -19,6 +21,34 @@ const REPEAT_EVERY = 190
 const END_CLEARANCE = 34
 
 const Y_LABEL = 0.06
+
+/**
+ * How many names may be drawn at once.
+ *
+ * Every label is its own mesh and so its own draw call — that is what lettering
+ * costs, here and in `StreetSigns` and `Shopfronts`, both of which have been
+ * budgeted from the start. This one was not, because at Dumbo's two hundred and
+ * sixty roads it never needed to be.
+ *
+ * Then a 3.6km import of Brooklyn arrived with 1,381 roads, and the labels alone
+ * were 850 of the frame's 1,538 draw calls: 14.8ms of submission against 6.6ms
+ * of actual drawing, and 55fps on a map the GPU was barely troubled by. A name
+ * you cannot read is worth nothing, and the nearest hundred are all anyone can
+ * read at once.
+ */
+const MAX_LABELS = 110
+
+/**
+ * How far from what you are looking at a name is worth drawing, and how small it
+ * may get before it stops being a word. Both looser than the street signs' —
+ * these lie flat on the carriageway and are set several times larger, so they
+ * stay legible much further out.
+ */
+const LABEL_RADIUS = 900
+const MIN_LABEL_PIXELS = 5
+
+/** Seconds between re-picks. This drives React, so not every frame. */
+const LABEL_INTERVAL = 0.25
 
 type Label = {
   key: string
@@ -77,11 +107,52 @@ function labelsFor(level: LevelDef, road: RoadDef): Label[] {
   return out
 }
 
+/**
+ * The nearest names, re-picked a few times a second.
+ *
+ * Deliberately the same shape as `StreetSigns`' own budget, down to the
+ * signature check that keeps an unchanged selection from re-rendering: the two
+ * are solving the same problem and there is no reason for them to differ.
+ */
+function useNearbyLabels(labels: Label[]): Label[] {
+  const anchor = useTextAnchor()
+  const [visible, setVisible] = useState<Label[]>([])
+  const timer = useRef(0)
+  const signature = useRef('')
+
+  useFrame((_, delta) => {
+    timer.current += delta
+    if (timer.current < LABEL_INTERVAL) return
+    timer.current = 0
+
+    const { x, z, pixelsPerMetre } = anchor()
+
+    let next: Label[] = []
+    // Sized per street, so the smallest is the one that decides legibility.
+    if (2.6 * pixelsPerMetre >= MIN_LABEL_PIXELS) {
+      next = labels
+        .map((label) => ({ label, d: (label.x - x) ** 2 + (label.z - z) ** 2 }))
+        .filter((e) => e.d < LABEL_RADIUS * LABEL_RADIUS)
+        .sort((a, b) => a.d - b.d)
+        .slice(0, MAX_LABELS)
+        .map((e) => e.label)
+    }
+
+    const key = next.map((l) => l.key).join('|')
+    if (key === signature.current) return
+    signature.current = key
+    setVisible(next)
+  })
+
+  return visible
+}
+
 export function StreetLabels({ level }: { level: LevelDef }) {
-  const labels = useMemo(
+  const all = useMemo(
     () => level.roads.flatMap((road) => labelsFor(level, road)),
     [level],
   )
+  const labels = useNearbyLabels(all)
 
   return (
     <group>
