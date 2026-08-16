@@ -1,4 +1,5 @@
 import type { OsmFile } from "./import";
+import { readTile, tileKey, writeTile } from "./tileCache";
 
 /**
  * Asking OpenStreetMap for a square of city.
@@ -180,7 +181,7 @@ export type FetchProgress =
   | { phase: "failed"; endpoint: string; error: string }
   | { phase: "received"; bytes: number }
   /** Tiled fetches only: which sub-box of how many is being asked for. */
-  | { phase: "tile"; index: number; total: number };
+  | { phase: "tile"; index: number; total: number; cached?: boolean };
 
 /**
  * Why an attempt failed, which is what decides the message somebody sees.
@@ -417,16 +418,6 @@ export const TILE_HALF_METRES = 900;
 /** Whole-import deadline for a tiled fetch. Generous: this is many round trips. */
 const TILED_BUDGET_MS = 15 * 60_000;
 
-/**
- * Breath between sub-boxes.
- *
- * Overpass's fair-use policy is about concurrent slots per address, and a
- * queue of back-to-back queries burns through them and starts collecting 429s.
- * Four hundred milliseconds was not a pause, it was a hammering; several
- * seconds is what makes a long import finish at all.
- */
-const TILE_GAP_MS = 4_000;
-
 /** Waits after a rate-limited tile, in ms. Backs off, then gives up. */
 const TILE_BACKOFF_MS = [10_000, 25_000, 60_000];
 
@@ -475,11 +466,27 @@ export function splitBbox(bbox: Bbox, halfMetres = TILE_HALF_METRES): Bbox[] {
 }
 
 /**
- * Fetch a box of any size, in pieces, and hand back one response.
+ * How many requests are in flight at once.
+ *
+ * Overpass grants an address a small number of slots and answers 429 past them,
+ * so this is the one number that must not be optimistic: two is what the public
+ * instance documents, and the measured cost of guessing higher is a rate limit
+ * that then holds up every remaining piece.
+ *
+ * Two is also most of the available speed-up. A tile costs about two seconds of
+ * fixed overhead and five seconds per square kilometre of actual work, so a 5km
+ * import is a couple of minutes of *server* time whatever the tiling — the only
+ * way to shorten the wait is to have some of it happening at once.
+ */
+const TILE_CONCURRENCY = 2;
+
+/**
+ * Fetch a box of any size and hand back one response.
  *
  * A single query for a whole city does not fail slowly — it fails after the
- * server's full sixty-second budget, with `tooBig`, having done all the work
- * and thrown it away. So anything past one tile is asked for a tile at a time.
+ * server's full sixty-second budget, with `tooBig`, having done all the work and
+ * thrown it away. So anything past one tile is asked for a tile at a time, from
+ * the cache where possible and two at a time where not.
  *
  * The seams need no stitching, and that is a property of the query rather than
  * luck: `way(bbox)` returns every way that so much as touches the box, and the
@@ -494,11 +501,7 @@ export async function fetchOverpassTiled(
   opts: FetchOptions = {},
 ): Promise<OsmFile> {
   const tiles = splitBbox(bbox);
-  if (tiles.length === 1) return fetchOverpass(bbox, opts);
-
   const startedAt = Date.now();
-  const seen = new Set<string>();
-  const elements: OsmFile["elements"] = [];
   const left = () => TILED_BUDGET_MS - (Date.now() - startedAt);
 
   /** Which failure kinds an `OverpassError` collected. */
@@ -508,17 +511,17 @@ export async function fetchOverpassTiled(
       : new Set<FailureKind>();
 
   /**
-   * One sub-box, with the two recoveries the server actually asks for.
+   * One box, with the two recoveries the server actually asks for.
    *
    * `busy` is a rate limit, and the answer to a rate limit is to wait rather
    * than to try somebody else — the inner fetch has already been through every
    * mirror by the time this sees it. `tooBig` is the opposite: waiting will
-   * never help, and the box has to get smaller, so it is quartered and each
-   * quarter asked for separately. Starting with optimistic tiles and letting
-   * the server push back is what keeps a sparse 5km import to nine requests
-   * while still handling the patch of city that needs thirty-six.
+   * never help and the box has to get smaller, so it is quartered and each
+   * quarter asked for separately. Starting with whole lattice cells and letting
+   * the server push back is what keeps a sparse import to nine requests while
+   * still handling the patch of city that needs thirty-six.
    */
-  const fetchTile = async (tile: Bbox, depth: number): Promise<OsmFile> => {
+  const fetchBox = async (box: Bbox, depth: number): Promise<OsmFile["elements"]> => {
     for (let attempt = 0; ; attempt++) {
       opts.signal?.throwIfAborted();
       const remaining = left();
@@ -527,19 +530,18 @@ export async function fetchOverpassTiled(
       }
 
       try {
-        return await fetchOverpass(tile, { ...opts, budgetMs: remaining });
+        return (await fetchOverpass(box, { ...opts, budgetMs: remaining })).elements;
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") throw err;
         const kinds = kindsOf(err);
 
         if (kinds.has("tooBig") && depth < MAX_TILE_DEPTH) {
-          const quarters = splitBbox(tile, tileHalfOf(tile) / 2);
+          const quarters = splitBbox(box, tileHalfOf(box) / 2);
           const merged: OsmFile["elements"] = [];
-          for (const [q, quarter] of quarters.entries()) {
-            if (q > 0) await wait(TILE_GAP_MS);
-            merged.push(...(await fetchTile(quarter, depth + 1)).elements);
+          for (const quarter of quarters) {
+            merged.push(...(await fetchBox(quarter, depth + 1)));
           }
-          return { elements: merged, bbox: tile };
+          return merged;
         }
 
         const backoff = TILE_BACKOFF_MS[attempt];
@@ -552,17 +554,60 @@ export async function fetchOverpassTiled(
     }
   };
 
-  for (const [i, tile] of tiles.entries()) {
-    if (i > 0) await wait(TILE_GAP_MS);
-    opts.signal?.throwIfAborted();
-    opts.onProgress?.({ phase: "tile", index: i, total: tiles.length });
+  /*
+   * Results are collected per tile rather than merged as they arrive, because
+   * with two workers they no longer arrive in order — and an import that
+   * depended on the order its pieces came back in would be a different map on a
+   * slow day.
+   */
+  const parts = new Array<OsmFile["elements"]>(tiles.length);
+  let next = 0;
+  let done = 0;
 
-    /*
-     * No partial results. A city with a hole in it compiles into a network with
-     * streets that stop dead, which is far worse than a failed import: it looks
-     * like a map, and every route through the hole is quietly impossible.
-     */
-    for (const el of (await fetchTile(tile, 0)).elements) {
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= tiles.length) return;
+      opts.signal?.throwIfAborted();
+
+      const tile = tiles[i];
+      const key = tileKey(tile);
+      const cached = await readTile(key);
+      if (cached) {
+        parts[i] = cached;
+        opts.onProgress?.({ phase: "tile", index: done++, total: tiles.length, cached: true });
+        continue;
+      }
+
+      opts.onProgress?.({ phase: "tile", index: done, total: tiles.length, cached: false });
+      const elements = await fetchBox(tile, 0);
+      parts[i] = elements;
+      done++;
+
+      /*
+       * Cached the moment it lands, not at the end. The whole point is that a
+       * failure three pieces later costs three pieces, and storing only on
+       * success would mean the run that failed had cached nothing at all.
+       */
+      void writeTile(key, elements);
+    }
+  };
+
+  /*
+   * No partial results. A city with a hole in it compiles into a network with
+   * streets that stop dead, which is far worse than a failed import: it looks
+   * like a map, and every route through the hole is quietly impossible. So the
+   * first worker to fail takes the whole import down — and what it already
+   * fetched is in the cache, which is what makes trying again cheap.
+   */
+  await Promise.all(
+    Array.from({ length: Math.min(TILE_CONCURRENCY, tiles.length) }, worker),
+  );
+
+  const seen = new Set<string>();
+  const elements: OsmFile["elements"] = [];
+  for (const part of parts) {
+    for (const el of part ?? []) {
       const key = `${el.type}/${el.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -570,8 +615,9 @@ export async function fetchOverpassTiled(
     }
   }
 
-  // The importer projects to local metres about the centre of this box, so it
-  // must be the box that was asked for, not the last tile fetched.
+  // The importer projects to local metres about the centre of this box and
+  // clips to it, so it must be the box that was asked for — not the lattice
+  // cells that were fetched, which reach past it on every side.
   return { elements, bbox };
 }
 

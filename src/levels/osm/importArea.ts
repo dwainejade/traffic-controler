@@ -6,7 +6,7 @@ import {
   boxAround,
   fetchOverpassTiled,
   OverpassError,
-  TILE_HALF_METRES,
+  splitBbox,
 } from "./overpass";
 
 /**
@@ -28,9 +28,9 @@ export const RADIUS_MIN = 100;
  * waiting, and which compiles a level big enough to be worth thinking about
  * before storing.
  *
- * 2500 gives a 5km square. That is 25 sub-box fetches at `TILE_HALF_METRES`,
- * which is a long wait but a bounded one, and it is about the largest area
- * anybody can usefully look at as one place.
+ * 2500 gives a 5km square. That is nine pieces, fetched two at a time and
+ * cached as they land — a long wait but a bounded one, and about the largest
+ * area anybody can usefully look at as one place.
  */
 export const RADIUS_MAX = 2500;
 export const RADIUS_DEFAULT = 300;
@@ -38,17 +38,26 @@ export const RADIUS_DEFAULT = 300;
  * Past this the import stops being one round trip and becomes several, so it is
  * worth saying so before somebody starts a five-minute wait by accident.
  */
-export const RADIUS_WARN = TILE_HALF_METRES;
+export const RADIUS_WARN = 900;
+
+/** How many separate Overpass requests an import of this radius will need. */
+export function tileCount(lat: number, lon: number, radius: number): number {
+  return splitBbox(boxAround(lat, lon, radius)).length;
+}
 
 /**
- * Roughly how long an import of this radius takes, in minutes, for the warning
- * line. One round trip per tile, and the tiles are paced apart on purpose —
- * see `TILE_GAP_MS`. Deliberately pessimistic: a wait that finishes early is a
- * pleasant surprise and a wait that overruns its estimate is a bug report.
+ * Roughly how long an import of this radius takes, in minutes.
+ *
+ * Measured rather than guessed: a request costs about two seconds of fixed
+ * overhead plus five seconds per square kilometre of ground, and two of them run
+ * at once. Deliberately rounded up — a wait that finishes early is a pleasant
+ * surprise and a wait that overruns its estimate is a bug report. Cached tiles
+ * are not subtracted, for the same reason.
  */
-export function estimatedMinutes(radius: number): number {
-  const perSide = Math.max(1, Math.ceil(radius / TILE_HALF_METRES));
-  return Math.max(1, Math.round((perSide * perSide * 20) / 60));
+export function estimatedMinutes(tiles: number, radius: number): number {
+  const areaKm2 = ((radius * 2) / 1000) ** 2;
+  const seconds = (tiles * 2 + areaKm2 * 5) / 2;
+  return Math.max(1, Math.ceil(seconds / 60));
 }
 
 export type ImportPhase =
@@ -60,7 +69,7 @@ export type ImportPhase =
       total: number;
       retry: boolean;
       /** Which sub-box of how many, when the area needs more than one. */
-      tile?: { index: number; total: number };
+      tile?: { index: number; total: number; cached?: boolean };
     }
   | { kind: "compiling" }
   | { kind: "checking" }
@@ -126,12 +135,28 @@ export async function importArea(
      * straight to the plain fetch, so the small imports that were working
      * before take exactly the path they always did.
      */
-    let tile: { index: number; total: number } | undefined;
+    let tile: { index: number; total: number; cached?: boolean } | undefined;
     file = await fetchOverpassTiled(bbox, {
       signal: opts.signal,
       onProgress: (p) => {
         if (p.phase === "tile") {
-          tile = { index: p.index, total: p.total };
+          tile = { index: p.index, total: p.total, cached: p.cached };
+          /*
+           * A cached piece never reaches a mirror, so it would otherwise pass
+           * without the progress line moving at all — and an import that sits
+           * on "piece 1 of 9" while it silently reads eight of them from disk
+           * looks stuck at exactly the moment it is doing best.
+           */
+          if (p.cached) {
+            opts.onPhase?.({
+              kind: "fetching",
+              endpoint: "cache",
+              index: 0,
+              total: 1,
+              retry: false,
+              tile,
+            });
+          }
           return;
         }
         if (p.phase === "trying") {
