@@ -1,13 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { SIGNAL } from "../art/palette";
 import { formatHour } from "../art/daylight";
 import type { World } from "../sim/world";
 import {
-  clearSelection,
-  cancelLinking,
-  focusJunction,
   nudgeSpeed,
-  selectJunction,
   setSpeed,
   sliderForSpeed,
   speedForSlider,
@@ -15,16 +10,10 @@ import {
   useHud,
   LAYERS,
 } from "./hudStore";
-import { ProgramPanel } from "./ProgramPanel";
 import { useIsMobile } from "./useIsMobile";
 import { warmupFor } from "../sim/types";
+import { typing } from "./typing";
 import "./Hud.css";
-
-const SIGNAL_LABEL = {
-  green: "Running",
-  amber: "Clearing",
-  allRed: "All red",
-} as const;
 
 
 function formatClock(seconds: number): string {
@@ -66,9 +55,6 @@ export function Hud({
   const sandbox = world.level.sandbox === true;
   // A sandbox never ends, so it never shows a result card.
   const over = hud.state !== "running" && !sandbox;
-  // No fallback to the first junction: nothing selected means nothing to edit.
-  const junction = hud.junctions.find((j) => j.id === hud.selected) ?? null;
-
   const restart = useCallback(() => {
     world.reset();
     world.warmup(warmupFor(world.level));
@@ -94,29 +80,19 @@ export function Hud({
         setSpeed(useHud.getState().speed === 0 ? 1 : 0);
         return;
       }
-      if (e.key === "[") return nudgeSpeed(-1);
-      if (e.key === "]") return nudgeSpeed(1);
-
-      // Tab cycles junctions — on a grid, switching attention fast matters more
-      // than any single phase call.
-      if (e.key === "Tab" && hud.junctions.length > 1) {
-        e.preventDefault();
-        const i = hud.junctions.findIndex((j) => j.id === hud.selected);
-        const next = hud.junctions[(i + (e.shiftKey ? -1 : 1) + hud.junctions.length) % hud.junctions.length];
-        if (next) selectJunction(next.id);
+      // Straight in and out of the street-level camera, from anywhere.
+      if ((e.key === "v" || e.key === "V") && !e.metaKey && !e.ctrlKey && !e.altKey && !typing()) {
+        toggleLayer("walkCamera");
         return;
       }
 
-      if (e.key === "Escape") {
-        // Back out one layer at a time: the link being built, then the
-        // selection, so Escape always means "less UI".
-        if (useHud.getState().linking) cancelLinking();
-        else clearSelection();
-      }
+      if (e.key === "[") return nudgeSpeed(-1);
+      if (e.key === "]") return nudgeSpeed(1);
+
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [world, junction, hud.junctions, hud.selected, over, restart]);
+  }, [world, over, restart]);
 
   const progress =
     hud.delayBudget !== null
@@ -128,17 +104,8 @@ export function Hud({
   const barIsThreat = hud.delayBudget !== null;
   const urgent = hud.timeLeft <= 15;
   const throughput = hud.elapsed > 0 ? (hud.delivered / hud.elapsed) * 60 : 0;
-  // Beyond about six junctions a flat list stops being scannable, so rank them.
-  const crowded = hud.junctions.length > 6;
-  const hotspots = crowded
-    ? [...hud.junctions].sort((a, b) => b.queue - a.queue).slice(0, 6)
-    : hud.junctions;
-
   // Sun or moon, on the same threshold the street lighting uses.
   const isDark = hud.timeOfDay < 6.4 || hud.timeOfDay > 20.4;
-
-  const dotFor = (signal: keyof typeof SIGNAL_LABEL) =>
-    signal === "green" ? SIGNAL.green : signal === "amber" ? SIGNAL.amber : SIGNAL.red;
 
   /*
    * The blocks below are written once and placed twice: on a wide screen they
@@ -248,33 +215,16 @@ export function Hud({
     </>
   );
 
-  const junctionList = hud.junctions.length > 1 && (
-    <>
-      {hotspots.length > 0 && (
-        <div className="hotspot-head">{crowded ? "Most congested" : "Junctions"}</div>
-      )}
-      {hotspots.map((j) => (
-        <button
-          key={j.id}
-          className={"jchip" + (j.id === hud.selected ? " is-selected" : "")}
-          onClick={() => {
-            focusJunction(j.id);
-            // On a phone the sheet covers the map it just flew to.
-            if (mobile) setInfoOpen(false);
-          }}
-          title={crowded ? "Jump to this junction" : undefined}
-        >
-          <span className="jchip-dot" style={{ background: dotFor(j.signal) }} />
-          <span className="jchip-id">{j.id}</span>
-          <span className={"jchip-queue" + (j.queue >= 8 ? " is-hot" : "")}>{j.queue}</span>
-        </button>
-      ))}
-    </>
-  );
-
   return (
     <>
       <div className={"drain" + (over ? " is-active" : "")} />
+
+      {/* What the keys do while the camera is yours, since the mouse is captured. */}
+      {hud.layers.walkCamera && (
+        <div className="walk-badge">
+          {"Walk mode — click to look · WASD move · F fly · Shift sprint · Esc frees the mouse, again to exit"}
+        </div>
+      )}
 
       {!sandbox && !mobile && (
         <div className="panel panel-objective">{objective}</div>
@@ -283,7 +233,7 @@ export function Hud({
       {/*
         Map layers, in the corner, the way every map app puts them. Collapsed to
         a single button by default: these are settings you change once and then
-        forget, and they must not compete with the junction you are re-timing.
+        forget, and they must not compete with the map itself.
       */}
       <div className="layers">
         <button
@@ -403,6 +353,29 @@ export function Hud({
                   />
                   <b>{hud.demand.toFixed(2)}/s</b>
                 </label>
+
+                {/*
+                  What the simulation is actually covering. Dev only, and only
+                  once a map is big enough to be clipped: the whole point of the
+                  region is that you cannot tell, so the only way to see it
+                  working is to print it.
+                */}
+                {import.meta.env.DEV && hud.simLanesTotal > 0 && (
+                  <div
+                    className="dock-stat"
+                    title="Lanes being simulated, of the whole map"
+                  >
+                    <b>
+                      {hud.simRadius === null
+                        ? "whole map"
+                        : `${Math.round(hud.simRadius)}m`}
+                    </b>
+                    <span>
+                      {Math.round((hud.simLanes / hud.simLanesTotal) * 100)}% of{" "}
+                      {hud.simLanesTotal} lanes
+                    </span>
+                  </div>
+                )}
               </>
             ) : (
               <div className="dock-stat">
@@ -410,11 +383,6 @@ export function Hud({
                 <span>on map</span>
               </div>
             )}
-
-            <span className="dock-sep" />
-            <span className="dock-hint">
-              {junction ? `editing ${junction.id}` : "click a junction to re-time it"}
-            </span>
           </>
         )}
       </div>
@@ -439,28 +407,10 @@ export function Hud({
             <div className="sheet-body">
               {objective}
               {sandboxStats}
-              {junctionList && <div className="sheet-junctions">{junctionList}</div>}
-              <p className="sheet-hint">
-                {junction
-                  ? `Editing ${junction.id} — the program is under the map.`
-                  : "Tap a junction on the map to re-time it."}
-              </p>
             </div>
           </div>
         </>
       )}
-
-      {/*
-        Junctions ranked by how much traffic is waiting at them.
-        Past a handful of junctions you cannot scan a flat list, and you should
-        not have to — the whole skill is noticing where the city is struggling,
-        so the list sorts itself and puts the worst at the top.
-      */}
-      {!mobile && hud.junctions.length > 1 && junction && (
-        <div className="panel panel-junctions">{junctionList}</div>
-      )}
-
-      {junction && <ProgramPanel world={world} junction={junction} />}
 
       {over && (
         <div className="result">

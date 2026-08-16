@@ -103,17 +103,43 @@ const MIN_ATTEMPT_MS = 15_000;
 const RETRY_DELAY_MS = 2_500;
 
 /*
- * Three sets, one query:
+ * Four sets, one query:
  *   - the driveable street network, with `>` to pull in each way's nodes so we
  *     have coordinates and can spot shared nodes (which is what an intersection
  *     *is* in OSM — ways that share a node, not ways that merely cross);
  *   - traffic signals and crossings, as tagged nodes;
  *   - buildings, water (closed ponds/rivers and open sea coastlines) and green
- *     space, for real footprints instead of scatter.
+ *     space, for real footprints instead of scatter;
+ *   - shops and the amenities that behave like shops, for the names and colours
+ *     over the doors. Almost all of these are nodes standing inside a building
+ *     rather than the building itself, which is why they need asking for
+ *     separately; `out center` covers the minority mapped as their own area, and
+ *     hands back a single point for it instead of a ring the importer would only
+ *     take the middle of anyway.
  *
  * `way(bbox)` returns whole ways that merely touch the box, so the geometry
  * runs past the edges; the importer clips it and puts sources on the boundary.
  */
+
+/**
+ * Amenities that put a name and a colour above a door. `shop=*` is taken
+ * wholesale — every value of it is a storefront by definition — but `amenity`
+ * is mostly street furniture, and a bench with a sign over it is not a thing.
+ */
+export const STOREFRONT_AMENITIES = [
+  "restaurant",
+  "fast_food",
+  "cafe",
+  "bar",
+  "pub",
+  "ice_cream",
+  "pharmacy",
+  "bank",
+  "fuel",
+  "cinema",
+  "post_office",
+] as const;
+
 export function overpassQuery(bbox: Bbox): string {
   const box = `${bbox.south},${bbox.west},${bbox.north},${bbox.east}`;
   return `
@@ -138,13 +164,23 @@ out body;
 out body;
 >;
 out skel qt;
+
+(
+  node["shop"](${box});
+  node["amenity"~"^(${STOREFRONT_AMENITIES.join("|")})$"](${box});
+  way["shop"](${box});
+  way["amenity"~"^(${STOREFRONT_AMENITIES.join("|")})$"](${box});
+);
+out center;
 `;
 }
 
 export type FetchProgress =
   | { phase: "trying"; endpoint: string; index: number; total: number; retry: boolean }
   | { phase: "failed"; endpoint: string; error: string }
-  | { phase: "received"; bytes: number };
+  | { phase: "received"; bytes: number }
+  /** Tiled fetches only: which sub-box of how many is being asked for. */
+  | { phase: "tile"; index: number; total: number };
 
 /**
  * Why an attempt failed, which is what decides the message somebody sees.
@@ -170,6 +206,12 @@ export type FetchOptions = {
    * mirror answers. So the browser must not pass this.
    */
   userAgent?: string;
+  /**
+   * Wall-clock ceiling for this call, mirrors and retries included. Defaults to
+   * `TOTAL_BUDGET_MS`. A tiled fetch passes what is left of the whole import's
+   * budget, so twenty-five sub-boxes cannot each spend two minutes failing.
+   */
+  budgetMs?: number;
 };
 
 export type Attempt = { endpoint: string; error: string; kind: FailureKind };
@@ -312,13 +354,14 @@ export async function fetchOverpass(
     (typeof window === "undefined" ? OVERPASS_ENDPOINTS : BROWSER_ENDPOINTS);
   const attempts: Attempt[] = [];
   const startedAt = Date.now();
+  const budget = opts.budgetMs ?? TOTAL_BUDGET_MS;
 
   for (const [i, endpoint] of endpoints.entries()) {
     // Asking the same mirror twice in a row only helps if it gets a breath.
     if (i > 0 && endpoint === endpoints[i - 1]) await wait(RETRY_DELAY_MS);
 
     // Never start an attempt there is no useful time left for.
-    const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
+    const remaining = budget - (Date.now() - startedAt);
     if (i > 0 && remaining < MIN_ATTEMPT_MS) break;
 
     opts.onProgress?.({
@@ -351,4 +394,194 @@ export async function fetchOverpass(
   }
 
   throw new OverpassError("no OpenStreetMap mirror answered", attempts);
+}
+
+/**
+ * Half-extent to ask for in one query, in metres.
+ *
+ * Bigger than the six hundred metres the importer used to cap at, and
+ * deliberately: the binding constraint on a tiled import is not the size of any
+ * one query, it is *how many* of them there are. The public Overpass instance
+ * allows a couple of slots per address and answers 429 beyond that, so twenty-
+ * five small requests is a far likelier failure than nine larger ones — which
+ * is not a guess, it is what a four-piece Brooklyn import did on its fourth
+ * piece the first time it ran.
+ *
+ * Nine hundred keeps a 5km box down to nine requests. Where that turns out to
+ * be too much for a particular patch of city, the server says so and the tile
+ * is quartered — see `fetchOverpassTiled`, which is why this can be optimistic
+ * without being risky.
+ */
+export const TILE_HALF_METRES = 900;
+
+/** Whole-import deadline for a tiled fetch. Generous: this is many round trips. */
+const TILED_BUDGET_MS = 15 * 60_000;
+
+/**
+ * Breath between sub-boxes.
+ *
+ * Overpass's fair-use policy is about concurrent slots per address, and a
+ * queue of back-to-back queries burns through them and starts collecting 429s.
+ * Four hundred milliseconds was not a pause, it was a hammering; several
+ * seconds is what makes a long import finish at all.
+ */
+const TILE_GAP_MS = 4_000;
+
+/** Waits after a rate-limited tile, in ms. Backs off, then gives up. */
+const TILE_BACKOFF_MS = [10_000, 25_000, 60_000];
+
+/** How many times a tile may be quartered before we stop believing the server. */
+const MAX_TILE_DEPTH = 2;
+
+/**
+ * Cut a box into pieces no larger than `TILE_HALF_METRES` a side.
+ *
+ * Even pieces rather than a full-size grid with a remainder strip: a 5km box
+ * divides into five columns of exactly 1km rather than four of 1.2km and one of
+ * 200m, and a sliver tile costs a whole round trip to fetch almost nothing.
+ */
+export function splitBbox(bbox: Bbox, halfMetres = TILE_HALF_METRES): Bbox[] {
+  const mid = (bbox.south + bbox.north) / 2;
+  const { perLat, perLon } = scaleAt(mid);
+  const spanLat = (bbox.north - bbox.south) * perLat;
+  const spanLon = (bbox.east - bbox.west) * perLon;
+
+  /*
+   * A metre of slack before rounding up. A box built by `boxAround` at exactly
+   * the tile size comes back as 1200.0000000001m after the round trip through
+   * degrees, and a bare `ceil` turns that into two requests for a box that fits
+   * in one — which is every import at the old six-hundred-metre limit suddenly
+   * costing twice what it used to.
+   */
+  const side = halfMetres * 2;
+  const rows = Math.max(1, Math.ceil(spanLat / side - 1e-3));
+  const cols = Math.max(1, Math.ceil(spanLon / side - 1e-3));
+
+  const stepLat = (bbox.north - bbox.south) / rows;
+  const stepLon = (bbox.east - bbox.west) / cols;
+
+  const tiles: Bbox[] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      tiles.push({
+        south: bbox.south + r * stepLat,
+        north: bbox.south + (r + 1) * stepLat,
+        west: bbox.west + c * stepLon,
+        east: bbox.west + (c + 1) * stepLon,
+      });
+    }
+  }
+  return tiles;
+}
+
+/**
+ * Fetch a box of any size, in pieces, and hand back one response.
+ *
+ * A single query for a whole city does not fail slowly — it fails after the
+ * server's full sixty-second budget, with `tooBig`, having done all the work
+ * and thrown it away. So anything past one tile is asked for a tile at a time.
+ *
+ * The seams need no stitching, and that is a property of the query rather than
+ * luck: `way(bbox)` returns every way that so much as touches the box, and the
+ * `>` that follows pulls in all of that way's nodes wherever on earth they are.
+ * So a street crossing a tile boundary comes back *complete* from either tile,
+ * and merging is a matter of dropping the duplicate rather than joining two
+ * halves. Deduplication is by `type/id`, since a node and a way may share a
+ * number.
+ */
+export async function fetchOverpassTiled(
+  bbox: Bbox,
+  opts: FetchOptions = {},
+): Promise<OsmFile> {
+  const tiles = splitBbox(bbox);
+  if (tiles.length === 1) return fetchOverpass(bbox, opts);
+
+  const startedAt = Date.now();
+  const seen = new Set<string>();
+  const elements: OsmFile["elements"] = [];
+  const left = () => TILED_BUDGET_MS - (Date.now() - startedAt);
+
+  /** Which failure kinds an `OverpassError` collected. */
+  const kindsOf = (err: unknown) =>
+    err instanceof OverpassError
+      ? new Set(err.attempts.map((a) => a.kind))
+      : new Set<FailureKind>();
+
+  /**
+   * One sub-box, with the two recoveries the server actually asks for.
+   *
+   * `busy` is a rate limit, and the answer to a rate limit is to wait rather
+   * than to try somebody else — the inner fetch has already been through every
+   * mirror by the time this sees it. `tooBig` is the opposite: waiting will
+   * never help, and the box has to get smaller, so it is quartered and each
+   * quarter asked for separately. Starting with optimistic tiles and letting
+   * the server push back is what keeps a sparse 5km import to nine requests
+   * while still handling the patch of city that needs thirty-six.
+   */
+  const fetchTile = async (tile: Bbox, depth: number): Promise<OsmFile> => {
+    for (let attempt = 0; ; attempt++) {
+      opts.signal?.throwIfAborted();
+      const remaining = left();
+      if (remaining < MIN_ATTEMPT_MS) {
+        throw new OverpassError("ran out of time part way through the area", []);
+      }
+
+      try {
+        return await fetchOverpass(tile, { ...opts, budgetMs: remaining });
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") throw err;
+        const kinds = kindsOf(err);
+
+        if (kinds.has("tooBig") && depth < MAX_TILE_DEPTH) {
+          const quarters = splitBbox(tile, tileHalfOf(tile) / 2);
+          const merged: OsmFile["elements"] = [];
+          for (const [q, quarter] of quarters.entries()) {
+            if (q > 0) await wait(TILE_GAP_MS);
+            merged.push(...(await fetchTile(quarter, depth + 1)).elements);
+          }
+          return { elements: merged, bbox: tile };
+        }
+
+        const backoff = TILE_BACKOFF_MS[attempt];
+        if (kinds.has("busy") && backoff !== undefined && left() > backoff + MIN_ATTEMPT_MS) {
+          await wait(backoff);
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+
+  for (const [i, tile] of tiles.entries()) {
+    if (i > 0) await wait(TILE_GAP_MS);
+    opts.signal?.throwIfAborted();
+    opts.onProgress?.({ phase: "tile", index: i, total: tiles.length });
+
+    /*
+     * No partial results. A city with a hole in it compiles into a network with
+     * streets that stop dead, which is far worse than a failed import: it looks
+     * like a map, and every route through the hole is quietly impossible.
+     */
+    for (const el of (await fetchTile(tile, 0)).elements) {
+      const key = `${el.type}/${el.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      elements.push(el);
+    }
+  }
+
+  // The importer projects to local metres about the centre of this box, so it
+  // must be the box that was asked for, not the last tile fetched.
+  return { elements, bbox };
+}
+
+/** Half the longer side of a box, in metres — what `splitBbox` measures against. */
+function tileHalfOf(bbox: Bbox): number {
+  const { perLat, perLon } = scaleAt((bbox.south + bbox.north) / 2);
+  return (
+    Math.max(
+      (bbox.north - bbox.south) * perLat,
+      (bbox.east - bbox.west) * perLon,
+    ) / 2
+  );
 }

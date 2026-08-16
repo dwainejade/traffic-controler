@@ -5,8 +5,11 @@ import type {
   NodeId,
   RoadClass,
   RoadDef,
+  Shopfront,
   ZoneDef,
 } from "../../sim/types";
+import { brandKey } from "../../art/brands";
+import { STOREFRONT_AMENITIES } from "./overpass";
 import {
   JUNCTION_MARGIN,
   LANE_WIDTH,
@@ -33,7 +36,23 @@ import {
 // --------------------------------------------------------------- OSM shapes
 
 type OsmNode = { type: "node"; id: number; lat: number; lon: number; tags?: Tags };
-type OsmWay = { type: "way"; id: number; nodes: number[]; tags?: Tags };
+/**
+ * `center` arrives instead of `nodes` on the shop query's `out center`, which
+ * asks for one point per area rather than its ring. The same way can appear
+ * twice in one response — once as a building with its nodes, once as a shop
+ * with only a centre — so every geometry pass below tests `nodes` before using
+ * it rather than assuming the shape it wanted is the shape it got.
+ */
+type OsmWay = {
+  type: "way";
+  id: number;
+  nodes?: number[];
+  center?: { lat: number; lon: number };
+  tags?: Tags;
+};
+
+/** A way that came back with its ring, which is every way with a shape to it. */
+type GeomWay = OsmWay & { nodes: number[] };
 type Tags = Record<string, string>;
 
 export type OsmFile = {
@@ -793,6 +812,202 @@ type Edge = {
   tags: Tags;
 };
 
+// ------------------------------------------------------------- storefronts
+
+/** How far a shop may sit outside every building and still be given one. */
+const SHOP_SNAP = 18;
+/** A wall shorter than this cannot hold a legible sign. */
+const MIN_FASCIA = 3.5;
+/** Sign boards are trimmed to this, however long the wall is. */
+const MAX_FASCIA = 14;
+/** How far from a carriageway a wall may be and still count as street-facing. */
+const STREET_REACH = 40;
+/** Height of the sign band's centre — above a door, below the first-floor sills. */
+const FASCIA_Y = 3.6;
+
+/**
+ * A business's sign, placed on the wall of the building it belongs to.
+ *
+ * Everything is presentational, so every step here fails soft: a shop with no
+ * building, no street-facing wall or no name is simply not signed, and the
+ * street is drawn exactly as it was before.
+ */
+function buildShopfronts(
+  elements: OsmFile["elements"],
+  footprints: BuildingFootprint[],
+  corridors: Corridor[],
+  project: (lat: number, lon: number) => P,
+  at: (id: number) => P,
+): Shopfront[] {
+  const rings = footprints.map((f) => ({
+    height: f.height,
+    poly: f.polygon.map(([x, z]) => ({ x, z })),
+  }));
+
+  // One sign per building: a mapped-out mall or an avenue block with eight
+  // units in it would otherwise stack eight boards on the same stretch of wall.
+  const taken = new Set<number>();
+  const out: Shopfront[] = [];
+
+  for (const el of elements) {
+    const tags = el.tags;
+    if (!tags?.name) continue;
+    /*
+     * The same filter the query uses, and it has to be applied again here: the
+     * buildings block asks for `way["building"]` with no regard to what is in
+     * it, so a church, a school and a fire station all arrive carrying an
+     * `amenity` tag whether anybody asked for them or not. Signing those put a
+     * shop board on every place of worship in Brooklyn Heights.
+     */
+    const category =
+      tags.shop ??
+      (STOREFRONT_AMENITIES.includes(
+        tags.amenity as (typeof STOREFRONT_AMENITIES)[number],
+      )
+        ? tags.amenity
+        : undefined);
+    if (!category) continue;
+
+    const point = pointOf(el, project, at);
+    if (!point) continue;
+
+    // The building it is in, or — for the ones mapped a few metres adrift, on
+    // the pavement or in the road — the nearest one within reach.
+    let index = rings.findIndex((r) => pointInPoly(point.x, point.z, r.poly));
+    if (index === -1) {
+      let best = SHOP_SNAP;
+      rings.forEach((r, i) => {
+        for (let j = 0; j < r.poly.length; j++) {
+          const d = distToSegment(point, r.poly[j], r.poly[(j + 1) % r.poly.length]);
+          if (d < best) {
+            best = d;
+            index = i;
+          }
+        }
+      });
+    }
+    if (index === -1 || taken.has(index)) continue;
+
+    const front = streetWall(rings[index].poly, corridors);
+    if (!front) continue;
+
+    taken.add(index);
+    out.push({
+      pos: [front.x, front.z],
+      angle: front.angle,
+      width: front.width,
+      // Never above the eaves: a two-metre garage cannot carry a sign at 3.6m.
+      y: Math.min(FASCIA_Y, Math.max(1.6, rings[index].height - 0.6)),
+      name: tags.name,
+      brand: brandKey(tags.brand ?? tags.name),
+      category,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Where a business stands.
+ *
+ * Three shapes arrive for the same thing. Most are nodes. A shop mapped as its
+ * own area comes back from `out center` as a centre point — except when the
+ * same way was already sent in full as a building, in which case Overpass
+ * merges the two and the centre never appears, so the ring has to be averaged
+ * instead. Missing that last case silently drops the department stores and
+ * supermarkets, which are exactly the ones mapped as areas.
+ */
+function pointOf(
+  el: OsmNode | OsmWay,
+  project: (lat: number, lon: number) => P,
+  at: (id: number) => P,
+): P | null {
+  if (el.type === "node") return project(el.lat, el.lon);
+  if (el.center) return project(el.center.lat, el.center.lon);
+  if (!el.nodes?.length) return null;
+
+  let x = 0;
+  let z = 0;
+  let n = 0;
+  for (const id of el.nodes) {
+    try {
+      const p = at(id);
+      x += p.x;
+      z += p.z;
+      n++;
+    } catch {
+      // A ring running off the edge of the extract. Whatever is left of it
+      // still centres well enough to find the building.
+    }
+  }
+  return n === 0 ? null : { x: x / n, z: z / n };
+}
+
+/**
+ * The wall to hang the sign on: of the outline's edges long enough to letter,
+ * the one that most faces a street.
+ *
+ * "Faces" rather than "is nearest": the measurement is taken a metre out in
+ * front of the wall, so a back wall a few metres from the avenue behind the
+ * block scores worse than the frontage it actually belongs to. The length floor
+ * is what keeps the sign off the two-metre chamfer that corner buildings have
+ * across the corner — geometrically the closest edge to the junction, and the
+ * one place on the building a name will not fit.
+ */
+function streetWall(
+  poly: P[],
+  corridors: Corridor[],
+): { x: number; z: number; angle: number; width: number } | null {
+  let best: { x: number; z: number; angle: number; width: number } | null = null;
+  let bestReach = STREET_REACH;
+
+  // Which side of a wall is outdoors, settled against the outline's own middle
+  // rather than against its winding. The winding is documented as
+  // counter-clockwise, but a sign that faces indoors on half the buildings is
+  // not worth trusting it for — and the centroid of a building outline is
+  // inside it for every shape a building is.
+  const cx = poly.reduce((s, p) => s + p.x, 0) / poly.length;
+  const cz = poly.reduce((s, p) => s + p.z, 0) / poly.length;
+
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const width = Math.hypot(b.x - a.x, b.z - a.z);
+    if (width < MIN_FASCIA) continue;
+
+    const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
+
+    /*
+     * The sign board is a box lying along its own local X, turned about Y to
+     * meet the wall. A Y rotation of `angle` sends local +X to
+     * (cos angle, -sin angle) and its face, local +Z, to (sin angle, cos angle)
+     * — so laying the board along a -> b is `atan2(-dz, dx)`, and the face then
+     * comes out perpendicular to the wall for free. Half the time it comes out
+     * pointing indoors, which the centroid settles.
+     */
+    let angle = Math.atan2(-(b.z - a.z), b.x - a.x);
+    if (Math.sin(angle) * (mid.x - cx) + Math.cos(angle) * (mid.z - cz) < 0) {
+      angle += Math.PI;
+    }
+
+    // A metre off the face, on the outside.
+    const probe = {
+      x: mid.x + Math.sin(angle),
+      z: mid.z + Math.cos(angle),
+    };
+    let reach = STREET_REACH;
+    for (const c of corridors) {
+      reach = Math.min(reach, distToSegment(probe, c.a, c.b) - c.half);
+    }
+    if (reach >= bestReach) continue;
+
+    bestReach = reach;
+    best = { x: mid.x, z: mid.z, angle, width: Math.min(width, MAX_FASCIA) };
+  }
+
+  return best;
+}
+
 export type ImportOptions = {
   id: string;
   name: string;
@@ -805,10 +1020,12 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
   const { project, halfX, halfZ } = projector(file.bbox);
 
   const rawNodes = new Map<number, OsmNode>();
-  const ways: OsmWay[] = [];
+  const ways: GeomWay[] = [];
   for (const el of file.elements) {
     if (el.type === "node") rawNodes.set(el.id, el);
-    else if (el.type === "way") ways.push(el);
+    // A way with no ring is a shop's centre point, not a shape. It is picked up
+    // by the storefront pass straight off `file.elements`.
+    else if (el.type === "way" && el.nodes) ways.push(el as GeomWay);
   }
 
   // --- 1. Positions, and the driveable edge list.
@@ -1505,10 +1722,29 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     pushZone(`green${g.id}`, g.kind, g.poly);
   }
 
+  /*
+   * --- 9. Shopfronts.
+   *
+   * OSM puts a shop where its door is, or in the middle of the unit, or a few
+   * metres out in the street — never on the wall, and the wall is the only
+   * place a sign can go. So each business is matched to the building it stands
+   * in (or the nearest one, for the ones mapped slightly adrift), and then to
+   * whichever of that building's walls faces the nearest carriageway. A shop
+   * whose sign would face away from every street is one nobody could read.
+   */
+  const shopfronts = buildShopfronts(
+    file.elements,
+    footprints,
+    corridors,
+    project,
+    at,
+  );
+
   return {
     id: opts.id,
     name: opts.name,
     footprints,
+    ...(shopfronts.length ? { shopfronts } : {}),
     // The card covers the box and whatever the sources were pushed out to.
     half: Math.max(halfX, halfZ, outermost + 10),
     nodes,

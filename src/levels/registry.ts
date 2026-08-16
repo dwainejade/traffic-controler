@@ -18,9 +18,11 @@ import { listAreas, saveArea, deleteArea, MAX_AREAS, type SavedArea } from "./st
  */
 
 type LevelsState = {
-  /** Built-ins first, then saved areas, oldest first. */
+  /** Built-ins first, then saved areas oldest first, then any benchmarks. */
   levels: LevelDef[];
   saved: SavedArea[];
+  /** Dev-only benchmark cities built this session. Empty in a shipped build. */
+  bench: LevelDef[];
   /** False until the first read of stored areas resolves. */
   loaded: boolean;
 };
@@ -30,15 +32,51 @@ export const useLevels = create<LevelsState>(() => ({
   // before any of this existed. Saved areas append a few milliseconds later.
   levels: LEVELS,
   saved: [],
+  bench: [],
   loaded: false,
 }));
+
+/**
+ * Dev-only levels built at runtime and never persisted — the benchmark cities.
+ *
+ * They live outside `saved` because they are not areas: nothing writes them to
+ * IndexedDB and nothing should. They live outside `LEVELS` because building one
+ * costs real time (a 25 km² grid is a couple of seconds of geometry), and the
+ * level list is walked on every boot.
+ *
+ * Held here rather than only in the store because every writer below rebuilds
+ * `levels` from scratch, and a transient level must survive an area being
+ * imported or deleted underneath it.
+ */
+const transient: LevelDef[] = [];
+
+/** The full list, in its fixed order: built-ins, saved areas, then benchmarks. */
+function compose(saved: SavedArea[]): LevelDef[] {
+  return [...LEVELS, ...saved.map((a) => a.level), ...transient];
+}
+
+/**
+ * Dev only: append a level that exists for this session alone.
+ *
+ * Idempotent by id, and deliberately so — re-registering must hand back the
+ * *same* `LevelDef` object, because `App`'s warmed-world cache is a `WeakMap`
+ * keyed on object identity and a fresh object throws the warmed world away.
+ */
+export function addTransientLevel(level: LevelDef): void {
+  if (transient.some((l) => l.id === level.id)) return;
+  transient.push(level);
+  useLevels.setState({
+    levels: compose(useLevels.getState().saved),
+    bench: [...transient],
+  });
+}
 
 /** Read stored areas into the list. Called once, from `main.tsx`. */
 export async function loadSavedAreas(): Promise<void> {
   if (useLevels.getState().loaded) return;
   const saved = await listAreas();
   useLevels.setState({
-    levels: [...LEVELS, ...saved.map((a) => a.level)],
+    levels: compose(saved),
     saved,
     loaded: true,
   });
@@ -49,19 +87,13 @@ export async function addArea(area: SavedArea): Promise<void> {
   await saveArea(area);
   const { saved } = useLevels.getState();
   const next = [...saved.filter((a) => a.id !== area.id), area];
-  useLevels.setState({
-    levels: [...LEVELS, ...next.map((a) => a.level)],
-    saved: next,
-  });
+  useLevels.setState({ levels: compose(next), saved: next });
 }
 
 export async function removeArea(id: string): Promise<void> {
   await deleteArea(id);
   const next = useLevels.getState().saved.filter((a) => a.id !== id);
-  useLevels.setState({
-    levels: [...LEVELS, ...next.map((a) => a.level)],
-    saved: next,
-  });
+  useLevels.setState({ levels: compose(next), saved: next });
 }
 
 export function atCapacity(): boolean {

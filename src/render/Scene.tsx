@@ -15,16 +15,24 @@ import { Medians } from "./Medians";
 import { RoadNetwork } from "./RoadNetwork";
 import { Buildings } from "./Buildings";
 import { Footprints } from "./Footprints";
+import { Shopfronts } from "./Shopfronts";
 import { Trees } from "./Trees";
 import { scatterLevel } from "./scatter";
 import { Controls } from "./Controls";
 import { CinematicCamera } from "./CinematicCamera";
-import { MAX_ZOOM, MIN_DISTANCE, maxDistance, minZoom } from "./cameraLimits";
+import { WalkCamera } from "./WalkCamera";
+import {
+  MAX_ZOOM,
+  MIN_DISTANCE,
+  farPlane,
+  maxDistance,
+  minZoom,
+  orthoDistance,
+} from "./cameraLimits";
 import { BusStops } from "./BusStops";
 import { ParkedCars } from "./ParkedCars";
 import { Simulation } from "./Simulation";
 import { CrashFocus } from "./CrashFocus";
-import { JunctionPicker } from "./JunctionPicker";
 import { QueuePressure } from "./QueuePressure";
 import { StreetLabels } from "./StreetLabels";
 import { StreetSigns } from "./StreetSigns";
@@ -32,8 +40,11 @@ import { StreetLights } from "./StreetLights";
 import { useGlowing } from "./glow";
 import { SignalHeads } from "./SignalHeads";
 import type { World } from "../sim/world";
-import { clearSelection, useHud } from "../ui/hudStore";
+import { useHud } from "../ui/hudStore";
 import { PerspectiveCamera, Stats } from "@react-three/drei";
+import { benchmark } from "./bench";
+import { benchLevel } from "../levels/bench";
+import { addTransientLevel } from "../levels/registry";
 
 /**
  * Fixed orthographic 3/4 camera. Ortho is doing real work here: it removes the
@@ -46,7 +57,6 @@ import { PerspectiveCamera, Stats } from "@react-three/drei";
  */
 const ELEVATION = THREE.MathUtils.degToRad(55);
 const AZIMUTH = THREE.MathUtils.degToRad(25);
-const DISTANCE = 1200;
 
 /** Unit vector from the map to the camera, shared by both projections. */
 const VIEW_DIR: [number, number, number] = [
@@ -55,11 +65,11 @@ const VIEW_DIR: [number, number, number] = [
   Math.cos(ELEVATION) * Math.cos(AZIMUTH),
 ];
 
-const CAMERA_POS: [number, number, number] = [
-  VIEW_DIR[0] * DISTANCE,
-  VIEW_DIR[1] * DISTANCE,
-  VIEW_DIR[2] * DISTANCE,
-];
+/** The view direction, at whatever standoff this level's size needs. */
+function orthoPos(half: number): [number, number, number] {
+  const d = orthoDistance(half);
+  return [VIEW_DIR[0] * d, VIEW_DIR[1] * d, VIEW_DIR[2] * d];
+}
 
 /** Vertical field of view of the perspective camera, in degrees. */
 const FOV = 34;
@@ -102,8 +112,12 @@ function Reframe({
 
   useEffect(() => {
     if (camera instanceof THREE.OrthographicCamera) {
-      camera.position.set(...CAMERA_POS);
+      camera.position.set(...orthoPos(half));
       camera.zoom = zoom;
+      // Both planes have to reach across a card this camera may be standing a
+      // long way back from; `far` alone is not enough once the standoff grows.
+      camera.near = 1;
+      camera.far = farPlane(half) * 2;
     } else {
       // A perspective camera has no zoom to set — distance is the framing.
       const d = perspectiveDistance(half);
@@ -171,6 +185,22 @@ function DevHandle() {
         /** Draw only. Nothing animated updates — no useFrame callback runs. */
         frame: () => gl.render(scene, camera),
         /**
+         * What a frame of the map on screen costs, CPU and GPU. See `bench.ts`
+         * for why this cannot simply be a frame counter.
+         */
+        bench: () => benchmark(gl, scene, camera),
+        /**
+         * Build a benchmark city of the given half-extent, add it to the level
+         * list and return its id — `RENDERDEV.benchLevel(1500)`, then pick it
+         * from the level sheet. Building is seconds of work at the large sizes,
+         * which is why these are not in the list to begin with.
+         */
+        benchLevel: (half: number) => {
+          const level = benchLevel(half);
+          addTransientLevel(level);
+          return level.id;
+        },
+        /**
          * A whole frame, including every useFrame subscriber, so anything
          * driven by the render loop — signal colours, countdowns, the cars
          * themselves — actually advances before it is drawn.
@@ -235,6 +265,9 @@ const BLOOM_INTENSITY = 1.5;
 const BLOOM_THRESHOLD = 0.25;
 const BLOOM_SMOOTHING = 0.4;
 
+/** Metres ahead of the walker the lens focuses — about the far kerb. */
+const WALK_FOCUS_DISTANCE = 25;
+
 function PostFX({
   half,
   depthOfField,
@@ -250,6 +283,8 @@ function PostFX({
   const camera = useThree((s) => s.camera);
   const dof = useRef<DepthOfFieldEffect>(null);
   const glowing = useGlowing();
+  const walk = useHud((s) => s.layers.walkCamera);
+  const focusPoint = useMemo(() => new THREE.Vector3(), []);
 
   const zoomMin = useMemo(() => minZoom(half), [half]);
   const distMax = useMemo(() => maxDistance(half), [half]);
@@ -257,11 +292,25 @@ function PostFX({
   useFrame(() => {
     const effect = dof.current;
     if (!effect) return;
-    if (effect.target && controls) effect.target.copy(controls.target);
+    if (effect.target) {
+      if (controls) effect.target.copy(controls.target);
+      else if (walk) {
+        /*
+         * Walking there is no orbit target, and leaving the focus at the world
+         * origin would blur everything you actually walked over to look at.
+         * Focus a little way down your own eyeline instead.
+         */
+        camera.getWorldDirection(focusPoint);
+        effect.target
+          .copy(camera.position)
+          .addScaledVector(focusPoint, WALK_FOCUS_DISTANCE);
+      }
+    }
 
     // 0 = fully zoomed out, 1 = fully zoomed in. No orbit target (e.g. the
-    // cinematic flyover, which unmounts Controls) reads as zoomed out.
-    let t = 0;
+    // cinematic flyover, which unmounts Controls) reads as zoomed out. Walking
+    // is the opposite extreme — you are as close in as the map ever gets.
+    let t = walk ? 1 : 0;
     if (camera instanceof THREE.OrthographicCamera) {
       t = (camera.zoom - zoomMin) / (MAX_ZOOM - zoomMin);
     } else if (controls) {
@@ -324,12 +373,14 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
   const showLabels = useHud((s) => s.layers.labels);
   const showStreetSigns = useHud((s) => s.layers.streetSigns);
   const showStreetLights = useHud((s) => s.layers.streetLights);
+  const showShops = useHud((s) => s.layers.shopSigns);
   const showSignals = useHud((s) => s.layers.signals);
   const showParking = useHud((s) => s.layers.parking);
   const perspective = useHud((s) => s.layers.perspective);
   const depthOfField = useHud((s) => s.layers.depthOfField);
   const bloom = useHud((s) => s.layers.bloom);
   const cinematic = useHud((s) => s.layers.cinematicCamera);
+  const walk = useHud((s) => s.layers.walkCamera);
 
   /*
    * Frame the whole map whatever its size, so a 49-junction city opens showing
@@ -343,7 +394,12 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       orthographic
       dpr={[1, 2]}
       shadows={{ type: THREE.PCFShadowMap }}
-      camera={{ position: CAMERA_POS, zoom, near: 1, far: 10000 }}
+      camera={{
+        position: orthoPos(level.half),
+        zoom,
+        near: 1,
+        far: farPlane(level.half) * 2,
+      }}
       gl={{
         antialias: false,
         // Keep the palette exact — ACES tone mapping would crush these near-whites.
@@ -356,8 +412,6 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
          */
         preserveDrawingBuffer: import.meta.env.DEV,
       }}
-      // Clicking anywhere that isn't a junction puts the editors away.
-      onPointerMissed={() => clearSelection()}
     >
       {import.meta.env.DEV && <Stats />}
       {import.meta.env.DEV && <DevHandle />}
@@ -385,10 +439,15 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
            * it closer than the map's own framing distance, so nothing is ever
            * within 20m of it to clip. Trading a near plane that could never see
            * anything for a usable depth buffer is free.
+           *
+           * Walk mode is the one exception: standing in the street, a 20m near
+           * plane clips away everything you came to look at. It pays the price
+           * back in depth precision — expect the road markings to z-fight at a
+           * distance while walking.
            */
-          near={20}
-          far={6000}
-          position={CAMERA_POS}
+          near={walk ? 0.3 : 20}
+          far={farPlane(level.half)}
+          position={orthoPos(level.half)}
         />
       )}
       <Reframe level={level.id} zoom={zoom} half={level.half} />
@@ -396,6 +455,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
 
       <Controls level={level} />
       {cinematic && <CinematicCamera level={level} />}
+      {walk && <WalkCamera level={level} />}
 
       <Ground level={level} />
       <Parks zones={level.zones} />
@@ -411,13 +471,15 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       ) : (
         <Buildings items={buildings} />
       )}
+      {showShops && level.shopfronts?.length ? (
+        <Shopfronts fronts={level.shopfronts} />
+      ) : null}
       <Trees items={trees} />
       <QueuePressure world={world} />
       {showSignals && <SignalHeads level={level} world={world} />}
       <BusStops world={world} />
       {showParking && <ParkedCars world={world} />}
       <Simulation world={world} />
-      <JunctionPicker level={level} world={world} />
       <CrashFocus world={world} />
       {/* Nothing to composite if both effects are off — skip the whole pass. */}
       {(depthOfField || bloom) && (

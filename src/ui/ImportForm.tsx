@@ -7,8 +7,10 @@ import {
   RADIUS_MAX,
   RADIUS_MIN,
   RADIUS_WARN,
+  estimatedMinutes,
   type ImportPhase,
 } from "../levels/osm/importArea";
+import { TILE_HALF_METRES } from "../levels/osm/overpass";
 import { MAX_AREAS, useLevels } from "../levels/registry";
 
 /**
@@ -22,10 +24,19 @@ import { MAX_AREAS, useLevels } from "../levels/registry";
 /** What the phase looks like to somebody watching it. */
 function phaseLabel(p: ImportPhase): string {
   switch (p.kind) {
-    case "fetching":
+    case "fetching": {
+      /*
+       * Two counters, and the one that matters is the piece. Mirror attempts
+       * come and go in seconds; pieces are the thing that takes minutes, so on
+       * a tiled import that is the progress somebody is actually waiting on.
+       */
+      const where = p.tile
+        ? `piece ${p.tile.index + 1} of ${p.tile.total}`
+        : `${p.index + 1} of ${p.total}`;
       return p.retry
-        ? `Asking ${p.endpoint} again (${p.index + 1} of ${p.total})…`
-        : `Asking ${p.endpoint} (${p.index + 1} of ${p.total})…`;
+        ? `Asking ${p.endpoint} again (${where})…`
+        : `Asking ${p.endpoint} (${where})…`;
+    }
     case "compiling":
       return "Building the street network…";
     case "checking":
@@ -171,7 +182,7 @@ export function ImportForm({ onImported }: { onImported: (id: string) => void })
 
       <p className="import-note">
         {Number(radius) > RADIUS_WARN
-          ? "A box this big takes a minute or more, and plays as a city rather than a junction."
+          ? `A ${(Number(radius) * 2) / 1000}km square. Fetched in ${Math.max(1, Math.ceil(Number(radius) / TILE_HALF_METRES)) ** 2} pieces, paced so OpenStreetMap doesn't turn us away — allow about ${estimatedMinutes(Number(radius))} minute${estimatedMinutes(Number(radius)) === 1 ? "" : "s"}. Plays as a city rather than a junction.`
           : `A ${Number(radius) * 2}m square, centred on those coordinates.`}
       </p>
 

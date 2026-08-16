@@ -1,4 +1,11 @@
-import { idmAccel, IDM } from "./idm";
+import { idmAccel, IDM, MAX_BRAKE, timeToCover, type DrivePower } from "./idm";
+import { resolvePower, sampleDriver, type DriverProfile } from "./drivers";
+import {
+  CHANGE_COOLDOWN,
+  LANE_CHANGES,
+  mobilAccepts,
+  type Follower,
+} from "./laneChange";
 import {
   createJunction,
   cycleOf,
@@ -24,15 +31,17 @@ import {
   type Network,
   type TurnKind,
 } from "./network";
-import { TRUCK_ROUTE, type LevelDef, type NodeId } from "./types";
+import { LANE_WIDTH, TRUCK_ROUTE, type LevelDef, type NodeId } from "./types";
 import {
   buildConflicts,
   buildPriority,
   illegalPairsInPhase,
   type ConflictMap,
+  type ConflictPoint,
   type Priority,
 } from "./conflicts";
 import { buildRouting, routeTo, type RoutingTables } from "./routing";
+import { buildRegionIndex, type RegionIndex } from "./region";
 import { mulberry32 } from "../render/geometry";
 import { VEHICLE_COLORS } from "../art/palette";
 import { VEHICLE, conflictRadius, type VehicleKind } from "./vehicles";
@@ -52,12 +61,29 @@ export {
   type VehicleSpec,
 } from "./vehicles";
 
+/**
+ * The simulation's fixed step, in seconds of simulated time.
+ *
+ * Lives here rather than in the renderer because `warmup` integrates too, and
+ * for a long time it used a different figure — so a pre-warmed level settled
+ * into a subtly different state from one the player watched fill up. Anything
+ * with its own time constant (a driver's reaction lag, most of all) is sensitive
+ * to that, so there is exactly one step size and both callers read it.
+ */
+export const FIXED_DT = 1 / 120;
+
 /** Speed cap through a turning connector, m/s. Tight turns are slow turns. */
 const TURN_SPEED: Record<TurnKind, number> = {
   left: 6.0,
   right: 5.2,
   straight: IDM.v0,
 };
+
+/**
+ * How much of a driver's desired-speed deviation carries into the turn cap
+ * above. Well under 1: the cap is set by the corner, not by the driver.
+ */
+const TURN_SPEED_TEMPERAMENT = 0.4;
 
 /** How far ahead a car looks for a leader across lane boundaries. */
 const LOOKAHEAD = 90;
@@ -78,10 +104,15 @@ const CRITICAL_GAP = 5.0;
  * ends up broadside to the oncoming lane.
  *
  * Measured at the speed a vehicle actually takes a turn, not at free flow.
+ *
+ * Scaled by the driver, because gap acceptance is the most visibly personal
+ * thing a driver does: two cars at the same junction facing the same oncoming
+ * flow, one of which goes and one of which does not, is the single change that
+ * stops a line of permissive lefts looking like it is being metered.
  */
-function criticalGapFor(kind: VehicleKind): number {
-  const extra = VEHICLE[kind].length - VEHICLE.car.length;
-  return CRITICAL_GAP + extra / TURN_SPEED.left;
+function criticalGapFor(car: Car): number {
+  const extra = VEHICLE[car.kind].length - VEHICLE.car.length;
+  return (CRITICAL_GAP + extra / TURN_SPEED.left) * car.driver.gapScale;
 }
 
 /**
@@ -90,8 +121,12 @@ function criticalGapFor(kind: VehicleKind): number {
  */
 export const MIN_PHASE_GREEN = 4;
 
-/** How far before a turn a driver starts indicating, in metres. */
+/** Furthest before a turn a driver starts indicating, in metres. */
 const INDICATE_DISTANCE = 38;
+/** Nearest, for a car that is stopped or crawling. */
+const INDICATE_MIN = 12;
+/** Between the two, a driver signals about this many seconds out. */
+const INDICATE_SECONDS = 3;
 
 /**
  * How fast a car crosses from the kerb to the lane, m/s.
@@ -101,6 +136,36 @@ const INDICATE_DISTANCE = 38;
  * modelling this at all is that the traffic behind can be seen to react to it.
  */
 const LATERAL_SPEED = 1.5;
+
+/**
+ * How fast a car crosses between lanes, m/s.
+ *
+ * Faster than the parking manoeuvre above: one lane width in a little over a
+ * second and a half, which is what a real lane change takes. Slower and the
+ * driver looks like they are having second thoughts halfway across.
+ */
+const LANE_CHANGE_SPEED = 2.2;
+
+/**
+ * Clear road a car wants at each end of a lane change, in metres.
+ *
+ * A car still crossing between lanes as it reaches the junction is the one case
+ * the conflict model cannot represent: movements are paired to lanes when the
+ * network is built, so a car arriving in a lane whose connector it is not
+ * routed through has no legal path across. Keeping the manoeuvre this far back
+ * from the stop line means it is always finished before the question arises.
+ */
+const LANE_CHANGE_SETBACK = 20;
+
+/**
+ * Below this speed a driver is not shopping for a better lane, m/s.
+ *
+ * A stationary queue is exactly where the incentive term is loudest — the lane
+ * beside you is always moving — and also exactly where changing is least
+ * possible and least realistic. Without this the front of every red light
+ * dissolves into cars shuffling sideways.
+ */
+const LANE_CHANGE_MIN_SPEED = 2;
 
 /** Mean seconds between one parked car somewhere on the map deciding to leave. */
 const UNPARK_INTERVAL = 9;
@@ -164,6 +229,19 @@ export type Car = {
   district: number;
   /** Index into the vehicle colour palette. Random, as in life. */
   colour: number;
+  /** Who is driving: the one thing that differs between two identical cars. */
+  driver: DriverProfile;
+  /**
+   * `driver` and the vehicle spec multiplied out, so the following model reads
+   * four numbers instead of recomputing them for every car on every step.
+   */
+  power: DrivePower;
+  /**
+   * Current acceleration, m/s^2 — carried on the car rather than discarded each
+   * step because the driver's response to it lags (see `drive`), and because it
+   * is what the renderer needs to know whether the brake lights are on.
+   */
+  accel: number;
   /** Seconds spent stationary, for the wait-time score. */
   waited: number;
   /**
@@ -188,6 +266,20 @@ export type Car = {
   manoeuvre: "none" | "pullOut" | "pullIn";
   /** The bay this car is heading for, or came out of. */
   slot: number | null;
+  /**
+   * Which way this car last moved across the carriageway.
+   *
+   * `-1` toward the centreline, `+1` toward the kerb, `0` for a car that has not
+   * changed lane. Read by the indicators — a lane change is signalled like any
+   * other manoeuvre — and cleared once the car has finished sliding across.
+   */
+  changing: -1 | 0 | 1;
+  /**
+   * Seconds since this car last changed lane, saturating rather than growing
+   * without bound. The cooldown it feeds is what stops two lanes of near-equal
+   * incentive turning into one car swapping between them forever.
+   */
+  sinceChange: number;
   /**
    * Buses only: seconds left standing at a stop, and which stop that was.
    *
@@ -252,6 +344,13 @@ export type WorldStats = {
   delayHours: number;
   /** Mean seconds lost per car currently on the map. */
   networkDelay: number;
+  /**
+   * Lane changes made since construction. Diagnostic rather than scored: cars
+   * oscillating between two lanes of near-equal incentive is the classic
+   * failure of this model, and it shows up as neither a crash nor a delay —
+   * only as this number being absurd.
+   */
+  laneChanges: number;
 };
 
 /** Linear interpolation between two rush-profile points. */
@@ -278,6 +377,7 @@ const EMPTY_STATS = (): WorldStats => ({
   collisions: 0,
   delayHours: 0,
   networkDelay: 0,
+  laneChanges: 0,
 });
 
 export class World {
@@ -352,6 +452,34 @@ export class World {
   private attractWeights: number[] = [];
   /** Cars spawned per entry node — the check that directional demand is real. */
   readonly spawnByEntry = new Map<NodeId, number>();
+
+  /**
+   * The part of the network currently being simulated, or null for all of it.
+   *
+   * See `region.ts` for why this exists. Null is the original behaviour in
+   * full, and it is what every small map, the validator and the headless
+   * harness all get: a region is only ever adopted when one is asked for *and*
+   * it is smaller than the map, so nothing that fits on screen at once is ever
+   * clipped.
+   */
+  private region: { x: number; z: number; radius: number } | null = null;
+  private readonly regionIndex: RegionIndex;
+  /** Whole-map fallbacks, so the null-region path allocates nothing per step. */
+  private readonly allLanes: Lane[];
+  private readonly allJunctions: Junction[] = [];
+  private readonly allConflicts: ConflictPoint[][];
+
+  /** What `step` actually iterates. Identical to the `all*` sets when unclipped. */
+  private activeLanes: Lane[];
+  private activeJunctions: Junction[];
+  private activeConflicts: ConflictPoint[][];
+  /** `1` where that lane is inside the region. Always all-ones when unclipped. */
+  private laneActive: Uint8Array;
+  /**
+   * Where traffic enters the simulated area: the map edge when unclipped, and
+   * the ring of lanes crossing the region boundary when not.
+   */
+  private frontier: { node: NodeId; lanes: LaneId[]; weight: number }[] = [];
 
   constructor(level: LevelDef) {
     this.level = level;
@@ -481,6 +609,288 @@ export class World {
     this.attractWeights = this.routing.destinations.map((d) =>
       weightOf(d, "attractWeight"),
     );
+
+    this.regionIndex = buildRegionIndex(level, this.net);
+    this.allLanes = this.net.lanes;
+    this.allJunctions = [...this.junctions.values()];
+    this.allConflicts = [...this.conflicts.byJunction.values()];
+    this.activeLanes = this.allLanes;
+    this.activeJunctions = this.allJunctions;
+    this.activeConflicts = this.allConflicts;
+    this.laneActive = new Uint8Array(this.net.lanes.length).fill(1);
+    this.frontier = this.entries;
+    this.totalRoadLength = this.roadLengthOf(this.allLanes);
+  }
+
+  /**
+   * Confine the simulation to a disc around a point — normally whatever the
+   * camera is looking at.
+   *
+   * A request that would cover the whole map is not a region at all, and is
+   * taken as a request to drop back to simulating everything. That is what
+   * keeps the small maps behaving exactly as they always have without anything
+   * having to know how big a map is: zoom out far enough on Dumbo and the disc
+   * swallows it, and the clipping quietly switches itself off.
+   *
+   * Cheap to call every frame. The active sets are only rebuilt once the view
+   * has actually moved a meaningful fraction of the region's own size, because
+   * rebuilding them is a walk over every lane on the map and doing that per
+   * frame would cost more than the clipping saves.
+   */
+  setRegion(x: number, z: number, radius: number): void {
+    const mapRadius = this.level.half * Math.SQRT2;
+    if (radius >= mapRadius) {
+      this.clearRegion();
+      return;
+    }
+
+    const current = this.region;
+    if (current) {
+      const moved = Math.hypot(x - current.x, z - current.z);
+      const grew = Math.abs(radius - current.radius) / current.radius;
+      if (moved < current.radius * 0.2 && grew < 0.1) return;
+    }
+
+    this.region = { x, z, radius };
+    this.rebuildActive();
+  }
+
+  /** Simulate the whole network again. */
+  clearRegion(): void {
+    if (!this.region) return;
+    this.region = null;
+    this.activeLanes = this.allLanes;
+    this.activeJunctions = this.allJunctions;
+    this.activeConflicts = this.allConflicts;
+    this.laneActive.fill(1);
+    this.frontier = this.entries;
+    this.demandShare = 1;
+  }
+
+  /** True while only part of the network is being simulated. */
+  get clipped(): boolean {
+    return this.region !== null;
+  }
+
+  /** Radius currently simulated, or null when that is the whole map. */
+  get regionRadius(): number | null {
+    return this.region?.radius ?? null;
+  }
+
+  /** How much of the network the current region covers, for the dev readout. */
+  regionStats(): { lanes: number; junctions: number; totalLanes: number } {
+    return {
+      lanes: this.activeLanes.length,
+      junctions: this.activeJunctions.length,
+      totalLanes: this.allLanes.length,
+    };
+  }
+
+  private rebuildActive(): void {
+    const region = this.region;
+    if (!region) return;
+
+    const { centre, radius: laneRadius, junctionPos, incoming } = this.regionIndex;
+    const { x, z, radius } = region;
+
+    /*
+     * How busy the traffic already is, measured before the region moves, so the
+     * streets coming into it can be filled to match. See `seed`.
+     */
+    const density = this.laneDensity();
+    const wasActive = this.laneActive.slice();
+
+    this.laneActive.fill(0);
+    const lanes: Lane[] = [];
+    for (const lane of this.allLanes) {
+      const dx = centre[lane.id * 2] - x;
+      const dz = centre[lane.id * 2 + 1] - z;
+      // Against the lane's bounding sphere, so a long lane reaching into the
+      // region counts even when its midpoint is well outside it.
+      if (Math.hypot(dx, dz) - laneRadius[lane.id] > radius) continue;
+      this.laneActive[lane.id] = 1;
+      lanes.push(lane);
+    }
+    this.activeLanes = lanes;
+
+    this.activeJunctions = this.allJunctions.filter((j) => {
+      const p = junctionPos.get(j.nodeId);
+      if (!p) return false;
+      return Math.hypot(p.x - x, p.z - z) <= radius;
+    });
+
+    this.activeConflicts = this.activeJunctions
+      .map((j) => this.conflicts.byJunction.get(j.nodeId))
+      .filter((points): points is ConflictPoint[] => points !== undefined);
+
+    /*
+     * The frontier: active road lanes that traffic can arrive on.
+     *
+     * Either the lane is a genuine map edge — those keep their level's spawn
+     * weights, so a hand-tuned arterial still carries its share — or it is an
+     * interior lane whose upstream neighbour has been clipped away, which is
+     * where a street enters the simulated area from the part that isn't. Without
+     * the second kind the region fills only from whichever map edges happen to
+     * fall inside it, and a disc in the middle of a city has none at all.
+     */
+    const spawnable = new Set(this.net.spawnLanes);
+    const byNode = new Map<NodeId, LaneId[]>();
+    const edgeNodes = new Set<NodeId>();
+
+    for (const lane of lanes) {
+      if (lane.kind !== "road" || lane.access !== "all") continue;
+      if (lane.fromNode === null) continue;
+
+      const isEdge = spawnable.has(lane.id);
+      if (!isEdge) {
+        const feeders = incoming.get(lane.id);
+        // No feeders at all means a dead end, which is not a way in.
+        if (!feeders || feeders.length === 0) continue;
+        if (feeders.every((id) => this.laneActive[id] === 1)) continue;
+      }
+
+      const list = byNode.get(lane.fromNode);
+      if (list) list.push(lane.id);
+      else byNode.set(lane.fromNode, [lane.id]);
+      if (isEdge) edgeNodes.add(lane.fromNode);
+    }
+
+    const weightAt = (node: NodeId) =>
+      edgeNodes.has(node)
+        ? (this.entries.find((e) => e.node === node)?.weight ?? 1)
+        : 1;
+
+    this.frontier = [...byNode].map(([node, laneIds]) => ({
+      node,
+      lanes: laneIds,
+      weight: weightAt(node),
+    }));
+
+    this.demandShare =
+      this.totalRoadLength > 0
+        ? this.roadLengthOf(lanes) / this.totalRoadLength
+        : 1;
+
+    this.seed(
+      lanes.filter((l) => wasActive[l.id] === 0),
+      density,
+    );
+  }
+
+  /** Metres of general-traffic road lane in a set of lanes. */
+  private roadLengthOf(lanes: readonly Lane[]): number {
+    let total = 0;
+    for (const lane of lanes) {
+      if (lane.kind === "road" && lane.access === "all") total += lane.length;
+    }
+    return total;
+  }
+
+  /**
+   * Share of the map's driveable lane length currently being simulated, which
+   * is the factor arrivals have to be scaled by.
+   *
+   * `demand` is the whole map's arrival rate — cars per second across every
+   * approach — and the frontier of a region is not every approach. Injecting the
+   * whole city's traffic into a disc a fraction of its size floods it: at 25x on
+   * a 720m region it produced 2,791 cars on 1,839 lanes, a solid jam that was
+   * nothing but an artefact of how much map happened to be on screen. Scaling by
+   * lane length keeps cars-per-metre — the thing you actually see — invariant to
+   * the region's size, so zooming and speeding up change what is simulated
+   * without changing how busy the streets look.
+   */
+  private demandShare = 1;
+
+  /** Driveable lane length of the whole map, the denominator of `demandShare`. */
+  private totalRoadLength = 0;
+
+  /** Cars per metre of general-traffic road lane, over the simulated area. */
+  private laneDensity(): number {
+    let cars = 0;
+    let length = 0;
+    for (const lane of this.activeLanes) {
+      if (lane.kind !== "road" || lane.access !== "all") continue;
+      cars += lane.cars.length;
+      length += lane.length;
+    }
+    return length > 0 ? cars / length : 0;
+  }
+
+  /**
+   * Put traffic on streets that have just come into the simulated area.
+   *
+   * Without this, panning is a disaster to watch. Cars can only enter at the
+   * frontier and have to drive inward from it, so the middle of the region —
+   * exactly where the player is looking — is the *last* place to fill: at
+   * typical speeds a car needs upwards of a minute of simulated time to cross
+   * from the boundary to the centre. Panning to a new part of the city showed
+   * empty roads that slowly came alive, which reads as the map being broken
+   * rather than as the traffic being somewhere else.
+   *
+   * The density is measured from the traffic already running rather than picked,
+   * so this matches whatever the map has settled at instead of asserting a
+   * number of its own — and at a dead stop, or before the first warmup, the
+   * measured density is zero and this does nothing at all.
+   */
+  private seed(lanes: Lane[], density: number): void {
+    if (density <= 0) return;
+
+    const tables = this.routingFor.car;
+    // Room for a car and the gap it would keep, so seeding can never produce a
+    // queue tighter than the car-following model would ever allow.
+    const minGap = VEHICLE.car.length + IDM.s0 + 2;
+
+    for (const lane of lanes) {
+      if (lane.kind !== "road" || lane.access !== "all") continue;
+      if (lane.cars.length > 0) continue;
+
+      const expected = density * lane.length;
+      let n = Math.floor(expected);
+      // The fractional part as a probability, so low densities still scatter
+      // cars about instead of rounding every lane down to none.
+      if (this.rand() < expected - n) n++;
+      n = Math.min(n, Math.floor(lane.length / minGap));
+      if (n <= 0) continue;
+
+      const gap = lane.length / n;
+      for (let k = 0; k < n; k++) {
+        // Front to back: `insertOnLane` wants descending `s`.
+        const at = lane.length - (k + 0.5) * gap;
+        const dest = this.pickWeighted(
+          tables.destinations,
+          (d, i) =>
+            (tables.cost.get(d)?.[lane.id] ?? Infinity) === Infinity
+              ? 0
+              : this.attractWeights[i],
+        );
+        if (dest === null) continue;
+
+        const route = routeTo(this.net, tables, lane.id, dest, this.rand);
+        if (!route) continue;
+
+        const car = this.create(route, tables.destinations.indexOf(dest), "car", at);
+        // Mid-journey, not just arrived: a seeded car that thinks it has been
+        // driving for zero seconds would drag the mean delay down every pan.
+        car.v = VEHICLE.car.v0 * (0.6 + this.rand() * 0.4);
+      }
+    }
+  }
+
+  /**
+   * Retire whatever has driven out of the simulated area.
+   *
+   * A car outside the region is not paused, it is gone: nothing steps its lane,
+   * so leaving it in place would strand it mid-street forever and it would still
+   * be there, stopped, when the player panned back. Counted as retired rather
+   * than delivered — it did not finish its journey, and letting it score would
+   * turn panning the camera into a way of banking cars.
+   */
+  private retireEscaped(): void {
+    if (!this.region) return;
+    for (const car of this.cars) {
+      if (!car.active) continue;
+      if (this.laneActive[car.lane] === 0) this.retire(car, "left");
+    }
   }
 
   /** Demand multiplier at elapsed time t, from the level's rush profile. */
@@ -512,8 +922,8 @@ export class World {
     // The objective must not be evaluated while pre-filling the map, or the
     // level could be won or timed out before the player ever sees it.
     this.warming = true;
-    const steps = Math.round(seconds * 60);
-    for (let i = 0; i < steps; i++) this.step(1 / 60);
+    const steps = Math.round(seconds / FIXED_DT);
+    for (let i = 0; i < steps; i++) this.step(FIXED_DT);
     this.warming = false;
 
     this.state = "running";
@@ -708,7 +1118,7 @@ export class World {
     this.stats.elapsed += dt;
     this.signalClock += dt;
 
-    for (const j of this.junctions.values()) {
+    for (const j of this.activeJunctions) {
       stepJunction(j, this.signalClock, this.programOf(j));
     }
 
@@ -716,6 +1126,7 @@ export class World {
     this.unpark(dt);
     this.runBuses(dt);
     this.drive(dt);
+    this.retireEscaped();
     this.checkCrashes();
 
     // Mean delay carried by the traffic currently out there. Unlike meanWait,
@@ -756,7 +1167,7 @@ export class World {
    * left somebody stranded in the box.
    */
   private checkCrashes(): void {
-    for (const points of this.conflicts.byJunction.values()) {
+    for (const points of this.activeConflicts) {
       for (const p of points) {
         const laneA = this.net.lanes[p.a];
         if (laneA.cars.length === 0) continue;
@@ -829,7 +1240,10 @@ export class World {
     // Rush multiplies the base rate, so the sandbox demand slider still works.
     // Warmup fills the map at the profile's opening level.
     this.spawnAccum +=
-      this.demand * this.rushMult(this.warming ? 0 : this.stats.elapsed) * dt;
+      this.demand *
+      this.demandShare *
+      this.rushMult(this.warming ? 0 : this.stats.elapsed) *
+      dt;
 
     while (this.spawnAccum >= 1) {
       this.spawnAccum -= 1;
@@ -842,7 +1256,7 @@ export class World {
       // Try a few random entries; drop the arrival if they're all backed up.
       let placed = false;
       for (let attempt = 0; attempt < 10 && !placed; attempt++) {
-        const entry = this.pickWeighted(this.entries, (e) => e.weight);
+        const entry = this.pickWeighted(this.frontier, (e) => e.weight);
         if (!entry) break;
 
         // Send it somewhere other than where it came from, weighted by how
@@ -1146,11 +1560,19 @@ export class World {
     car.routeIdx = 0;
     car.district = district;
     car.colour = this.pickColour();
+    // Every field must be assigned here, not just on first construction: `car`
+    // above may be a recycled object off the free list, still carrying the
+    // previous occupant's driver.
+    car.driver = sampleDriver(this.rand, kind);
+    car.power = resolvePower(kind, car.driver);
+    car.accel = 0;
     car.waited = 0;
     car.lateral = 0;
     car.lateralTarget = 0;
     car.manoeuvre = "none";
     car.slot = null;
+    car.changing = 0;
+    car.sinceChange = CHANGE_COOLDOWN;
     car.dwellLeft = 0;
     car.servedStop = -1;
 
@@ -1170,7 +1592,10 @@ export class World {
    * a perfectly good end to a journey, and is counted separately only so the
    * ledger keeps balancing.
    */
-  private retire(car: Car, how: "delivered" | "towed" | "parked"): void {
+  private retire(
+    car: Car,
+    how: "delivered" | "towed" | "parked" | "left",
+  ): void {
     if (!car.active) return;
 
     const lane = this.net.lanes[car.lane];
@@ -1181,7 +1606,9 @@ export class World {
     this.free.push(car.id);
     this.stats.active--;
 
-    if (how === "towed") {
+    // Neither finished a journey, so neither counts towards delivered or the
+    // mean wait — they only have to stay in `spawned`'s accounting.
+    if (how === "towed" || how === "left") {
       this.stats.retired++;
       return;
     }
@@ -1214,7 +1641,10 @@ export class World {
   // ----------------------------------------------------------------- driving
 
   private drive(dt: number): void {
-    const { lanes } = this.net;
+    // Only the simulated part of the network: on a clipped map this is the
+    // single biggest saving in the step, because it is the one loop that runs
+    // over every lane whether or not anything is in it.
+    const lanes = this.activeLanes;
 
     // Accelerations are computed for every car before any car moves, so the
     // result doesn't depend on lane iteration order.
@@ -1247,7 +1677,32 @@ export class World {
           continue;
         }
 
-        car.v = Math.max(0, car.v + accel[car.id] * dt);
+        /*
+         * A driver does not arrive at the acceleration the model asks for
+         * instantly — they see the change, decide, and move a foot, and the
+         * whole thing takes a fraction of a second. Modelled as a first-order
+         * lag on the acceleration rather than as a true delayed observation:
+         * one float per car instead of a ring buffer of past states, and stable
+         * at any step size, where a real delay is not.
+         *
+         * That lag is what makes traffic waves. With a perfect controller a
+         * platoon absorbs a disturbance; with a late one it amplifies it
+         * backwards down the queue, which is the stop-and-go every driver knows
+         * and no version of this model has previously produced.
+         *
+         * The exception is not optional. An emergency stop is reflex, not
+         * deliberation, and easing gently towards full braking over a third of a
+         * second is precisely long enough to hit the car in front — so a target
+         * at the braking ceiling is applied on the spot.
+         */
+        const target = accel[car.id];
+        if (target <= MAX_BRAKE + 0.5) {
+          car.accel = target;
+        } else {
+          car.accel += (target - car.accel) * Math.min(1, dt / car.driver.reaction);
+        }
+
+        car.v = Math.max(0, car.v + car.accel * dt);
         car.s += car.v * dt;
 
         // Pulled up at a stop it has not served: open the doors.
@@ -1261,9 +1716,19 @@ export class World {
           }
         }
 
+        car.sinceChange = Math.min(CHANGE_COOLDOWN, car.sinceChange + dt);
+
         // Ease across toward the lane, or across toward the kerb.
         if (car.lateral !== car.lateralTarget) {
-          const step = LATERAL_SPEED * dt;
+          /*
+           * A lane change crosses faster than a parking manoeuvre does. Pulling
+           * out of a bay is deliberately slow so the manoeuvre is legible and
+           * the traffic behind can be seen reacting to it; a driver changing
+           * lane at speed is across in a second and a half, and dawdling makes
+           * them look like they are having second thoughts.
+           */
+          const step =
+            (car.changing !== 0 ? LANE_CHANGE_SPEED : LATERAL_SPEED) * dt;
           const remaining = car.lateralTarget - car.lateral;
           car.lateral =
             Math.abs(remaining) <= step
@@ -1274,6 +1739,8 @@ export class World {
             car.manoeuvre = "none";
             car.slot = null;
           }
+          // Arrived wherever it was heading, so the indicator goes out.
+          if (car.lateral === car.lateralTarget) car.changing = 0;
         }
 
         if (car.v < 0.15) {
@@ -1285,8 +1752,251 @@ export class World {
       }
     }
 
+    this.changeLanes();
     this.advanceLanes();
     this.settleParking();
+  }
+
+  /**
+   * Offer every eligible car the lane beside it.
+   *
+   * Runs after the integration pass and before `advanceLanes`, so a car is
+   * looked at once, at a settled position, and cannot both change lane and hand
+   * over to the next lane of its route in the same step.
+   *
+   * The change is instantaneous in the model and animated in the render: the car
+   * is spliced straight into the target lane and given a `lateral` offset back
+   * toward the one it left, which the easing above then closes. This is the same
+   * device the parking model uses, and it is what keeps the whole feature clear
+   * of the 1-D invariant the rest of the simulation depends on — a car is on
+   * exactly one lane, and `lane.cars` stays ordered front-most first.
+   *
+   * The cost, which is real: for the second or so of the animation the car is
+   * followed as though it were already fully across, so the driver it left
+   * behind stops seeing it a little early. That is why the safety test below is
+   * applied to *both* lanes rather than only the one being entered.
+   */
+  private changeLanes(): void {
+    if (!LANE_CHANGES) return;
+    for (const lane of this.net.lanes) {
+      if (lane.kind !== "road") continue;
+      if (lane.left === null && lane.right === null) continue;
+
+      // Backwards, because a change splices the car out of `lane.cars` and a
+      // forward walk would then skip its neighbour.
+      for (let i = lane.cars.length - 1; i >= 0; i--) {
+        const car = this.cars[lane.cars[i]];
+        if (!this.mayChange(car, lane)) continue;
+
+        const ahead = i > 0 ? this.cars[lane.cars[i - 1]] : null;
+        const behind =
+          i + 1 < lane.cars.length ? this.cars[lane.cars[i + 1]] : null;
+
+        for (const side of [-1, 1] as const) {
+          const targetId = side < 0 ? lane.left : lane.right;
+          if (targetId === null) continue;
+          const target = this.net.lanes[targetId];
+          if (!this.mayEnter(car, lane, target)) continue;
+          if (!this.changeAccepted(car, lane, target, ahead, behind, side)) continue;
+
+          // Last, because it is the expensive test: a lane is only worth having
+          // if the rest of the journey still exists from it.
+          const tail = this.routeFrom(car, target);
+          if (tail === null) continue;
+
+          this.commitChange(car, lane, target, side, tail);
+          break;
+        }
+      }
+    }
+  }
+
+  /** Whether this car is in a position to be considering a lane change at all. */
+  private mayChange(car: Car, lane: Lane): boolean {
+    /*
+     * Buses never change lane. Their stops are bound to a particular lane when
+     * the network is built (`stopsByLane`), so a bus that moved across would
+     * sail past its own stop and never register having served it — and a bus
+     * route that skips stops is a worse bug than a bus stuck behind a car.
+     */
+    if (car.kind === "bus") return false;
+    /*
+     * Nor does a car with a bay booked. The bay is on the kerbside lane and the
+     * approach test asks whether the car is *on* that lane; move inward and it
+     * drives past its own destination.
+     */
+    if (car.slot !== null) return false;
+    // Committed to a bay, or still swinging out of one. `lateral` belongs to
+    // that manoeuvre and the two must never both be writing it.
+    if (car.manoeuvre !== "none") return false;
+    // Still sliding across from the last one.
+    if (car.changing !== 0) return false;
+    if (car.sinceChange < CHANGE_COOLDOWN) return false;
+    // A bus at a stop is not going anywhere, and neither is a stationary queue.
+    if (car.dwellLeft > 0) return false;
+    if (car.v < LANE_CHANGE_MIN_SPEED) return false;
+
+    /*
+     * Not on the approach to the stop line. A car still crossing between lanes
+     * as it enters the junction box is the one case the conflict model cannot
+     * represent — movements are paired to lanes at build time, and a car that
+     * arrives in a lane its connector does not leave from has no legal path.
+     */
+    if (lane.stopS >= 0 && car.s > lane.stopS - LANE_CHANGE_SETBACK) return false;
+    // Nor so close to the end of the link that the slide would outlast it.
+    return lane.length - car.s >= LANE_CHANGE_SETBACK;
+  }
+
+  /** Whether this car is allowed in that lane at all, before any gap question. */
+  private mayEnter(car: Car, from: Lane, target: Lane): boolean {
+    /*
+     * Never across the general/bus boundary, in either direction.
+     *
+     * Outward is the obvious half: the bus lane is somebody's neighbour, and
+     * general traffic may not use it however empty it looks — that restriction
+     * is the entire reason it is worth simulating. Inward matters just as much
+     * though, because connectors out of a bus lane are built assuming the
+     * corridor continues, so a bus that wandered into general traffic would be
+     * standing in a lane with no movement onto the rest of its own route.
+     */
+    if (target.access !== from.access) return false;
+    // Room to physically be there.
+    return target.length > VEHICLE[car.kind].length;
+  }
+
+  /**
+   * The car in `target` immediately ahead of, and immediately behind, arc
+   * length `s`. `lane.cars` is ordered front-most first, so the first entry
+   * with a smaller `s` is the follower and the one before it is the leader.
+   */
+  private neighboursAt(target: Lane, s: number): [Car | null, Car | null] {
+    let i = 0;
+    while (i < target.cars.length && this.cars[target.cars[i]].s > s) i++;
+    return [
+      i > 0 ? this.cars[target.cars[i - 1]] : null,
+      i < target.cars.length ? this.cars[target.cars[i]] : null,
+    ];
+  }
+
+  /** Clear distance from `follower`'s nose at `s` to `leader`'s rear bumper. */
+  private gapTo(s: number, leader: Car | null): { gap: number; leaderV: number } {
+    if (leader === null) return { gap: Infinity, leaderV: 0 };
+    return {
+      gap: leader.s - s - VEHICLE[leader.kind].length,
+      leaderV: leader.v,
+    };
+  }
+
+  /** One party to the decision, as the IDM wants it. */
+  private follower(car: Car, s: number, leader: Car | null, v0: number): Follower {
+    const { gap, leaderV } = this.gapTo(s, leader);
+    return { v: car.v, gap, leaderV, v0, power: car.power };
+  }
+
+  /**
+   * Whether MOBIL accepts this change.
+   *
+   * Everything here is the plain car-following term — deliberately not
+   * `accelFor`, which folds in signals, bus stops and parking bays. Those are
+   * properties of where the car is going, not of which lane it is in, and
+   * including them would have a driver change lane to get away from a red light
+   * that is red in both.
+   */
+  private changeAccepted(
+    car: Car,
+    from: Lane,
+    target: Lane,
+    ahead: Car | null,
+    behind: Car | null,
+    side: -1 | 1,
+  ): boolean {
+    // Sibling lanes have matching vertices but not matching arc length — an
+    // offset curve runs long on the outside of a bend — so map proportionally
+    // rather than carrying `s` across unchanged.
+    const sTarget = from.length > 0 ? (car.s / from.length) * target.length : car.s;
+    const [newLeader, newFollower] = this.neighboursAt(target, sTarget);
+
+    const v0 = this.speedOf(car, car.lane);
+
+    return mobilAccepts(
+      {
+        selfBefore: this.follower(car, car.s, ahead, v0),
+        selfAfter: this.follower(car, sTarget, newLeader, v0),
+
+        targetFollowerBefore:
+          newFollower &&
+          this.follower(newFollower, newFollower.s, newLeader, this.speedOf(newFollower, target.id)),
+        targetFollowerAfter:
+          newFollower &&
+          this.follower(newFollower, newFollower.s, car, this.speedOf(newFollower, target.id)),
+
+        sourceFollowerBefore:
+          behind &&
+          this.follower(behind, behind.s, car, this.speedOf(behind, from.id)),
+        sourceFollowerAfter:
+          behind &&
+          this.follower(behind, behind.s, ahead, this.speedOf(behind, from.id)),
+      },
+      car.driver.politeness,
+      side,
+    );
+  }
+
+  /**
+   * The rest of this car's journey, starting from `target` — or `null` if there
+   * isn't one.
+   *
+   * This is the check that stops lane changing from quietly breaking routing.
+   * Movements are bound to lanes when the network is built: a left turn leaves
+   * only from the lane nearest the centreline, a right only from the lane
+   * nearest the kerb. A car's route was found from the lane it spawned in, so
+   * the moment it moves across, every connector named further down that route
+   * may be one its new lane does not feed. Re-deriving the tail is the honest
+   * answer, and a change that has no tail is simply refused.
+   *
+   * Cheap enough despite the BFS walk behind it, because the cooldown means a
+   * car asks this at most once every few seconds.
+   */
+  private routeFrom(car: Car, target: Lane): LaneId[] | null {
+    const dest = this.routing.destinations[car.district];
+    if (dest === undefined) return null;
+    return routeTo(this.net, this.routingFor[car.kind], target.id, dest, this.rand);
+  }
+
+  /**
+   * Move the car across. Instantaneous in the model; the `lateral` offset it is
+   * given is what the renderer spends the next second and a half closing.
+   */
+  private commitChange(
+    car: Car,
+    from: Lane,
+    target: Lane,
+    side: -1 | 1,
+    tail: LaneId[],
+  ): void {
+    const at = from.cars.indexOf(car.id);
+    if (at >= 0) from.cars.splice(at, 1);
+
+    car.s = from.length > 0 ? (car.s / from.length) * target.length : car.s;
+    car.lane = target.id;
+    // Everything from here on was found from the lane the car has just left, so
+    // it is replaced wholesale with the tail found from the new one. `routeIdx`
+    // does not move: it still points at the link the car is on, which is now
+    // the first entry of the tail.
+    car.route.length = car.routeIdx;
+    for (const id of tail) car.route.push(id);
+    this.insertOnLane(target, car);
+
+    /*
+     * Drawn where it still is, and eased to where it now officially is. Sitting
+     * one lane width back toward the lane it left, on the side it came from:
+     * moving right means it was to the left, which is a negative offset.
+     */
+    car.lateral = -side * LANE_WIDTH;
+    car.lateralTarget = 0;
+    car.changing = side;
+    car.sinceChange = 0;
+    this.stats.laneChanges++;
   }
 
   private accelFor(car: Car, ahead: Car | null): number {
@@ -1341,7 +2051,10 @@ export class World {
         if (stop.id === car.servedStop) continue;
         const toStop = stop.laneS - car.s;
         if (toStop < 0 || toStop > STOP_APPROACH) continue;
-        const stopGap = toStop + IDM.s0;
+        // This driver's standstill gap, not the fleet average: IDM comes to rest
+        // with `s0` still in hand, so a stop line aimed past by anything else
+        // leaves the bus short of its own stop and it never registers arrival.
+        const stopGap = toStop + car.driver.s0;
         if (stopGap < gap) {
           gap = stopGap;
           leaderV = 0;
@@ -1381,7 +2094,7 @@ export class World {
              * forever, blocks the street, and never registers as having
              * arrived. There is nothing in front to leave room for here.
              */
-            const stopGap = toBay + IDM.s0;
+            const stopGap = toBay + car.driver.s0;
             if (stopGap < gap) {
               gap = stopGap;
               leaderV = 0;
@@ -1406,7 +2119,7 @@ export class World {
       if (junction !== undefined && nextId !== undefined) {
         if (!junction.green.has(nextId)) {
           stopped = true;
-        } else if (this.yieldBlockedAt(nextId, junction, car.kind) !== null) {
+        } else if (this.yieldBlockedAt(nextId, junction, car) !== null) {
           /*
            * Green, but the gap is not there yet. A driver does not sit behind
            * the line for this — they pull into the junction and wait alongside
@@ -1416,10 +2129,28 @@ export class World {
            * steady opposing flow the left turn is never served at all, so the
            * queue grows without limit and the street gridlocks.
            *
-           * One car at a time. The second waits at the line, exactly as it
-           * would in life, because there is only room in the box for one.
+           * How many wait in there is a question of room, not a rule.
+           *
+           * This used to be "one, always": anybody was blocked whenever the
+           * connector held a single car, however far along it that car had got.
+           * Measured on the crossroads, that was 73% of all the time a left
+           * turner spent held at the line, and it capped the movement at 0.80
+           * cars per green — with 157 of 360 greens serving nobody at all.
+           *
+           * A real junction stores whatever fits. So the test is whether there
+           * is space behind the last vehicle in the box, which lets the next car
+           * move up as the one ahead advances and be ready to follow it through
+           * the same gap, rather than starting from the line once it has gone.
+           * The car that moves up is not thereby committed to crossing: the
+           * mid-turn give-way check below still holds it short of the point
+           * where the paths actually meet.
            */
-          stopped = this.net.lanes[nextId].cars.length > 0;
+          const box = this.net.lanes[nextId];
+          const rearId = box.cars[box.cars.length - 1];
+          if (rearId !== undefined) {
+            const rear = this.cars[rearId];
+            stopped = rear.s < VEHICLE[car.kind].length + car.driver.s0;
+          }
         }
       }
 
@@ -1450,7 +2181,7 @@ export class World {
       const owner = this.net.lanes[lane.from].junction;
       const junction = owner !== null ? this.junctions.get(owner) : undefined;
       if (junction) {
-        const blockAt = this.yieldBlockedAt(lane.id, junction, car.kind, car.s);
+        const blockAt = this.yieldBlockedAt(lane.id, junction, car, car.s);
         if (blockAt !== null) {
           const stopGap = blockAt - conflictRadius(car.kind) - car.s;
           if (stopGap < gap) {
@@ -1461,11 +2192,7 @@ export class World {
       }
     }
 
-    const spec = VEHICLE[car.kind];
-    return idmAccel(car.v, gap, leaderV, v0, {
-      a: spec.accel,
-      b: spec.decel,
-    });
+    return idmAccel(car.v, gap, leaderV, v0, car.power);
   }
 
   /**
@@ -1484,11 +2211,13 @@ export class World {
   private yieldBlockedAt(
     connectorId: LaneId,
     junction: Junction,
-    kind: VehicleKind,
+    car: Car,
     from = 0,
   ): number | null {
     const targets = this.priority.yieldTo.get(connectorId);
     if (targets === undefined) return null;
+
+    const kind = car.kind;
 
     let earliest: number | null = null;
 
@@ -1529,6 +2258,12 @@ export class World {
        * doing 0 and looks like it will never arrive, when in fact it is about
        * to launch; taking its present speed at face value is what put cars into
        * the side of oncoming traffic.
+       *
+       * That used to be handled by flooring its speed at three quarters of free
+       * flow, which fixed the launching car by breaking the stationary one:
+       * measured, two thirds of the time a left turn was refused for want of a
+       * gap, the traffic it was yielding to was *stopped*. `timeToCover`
+       * integrates the launch instead, which is right in both cases.
        */
       if (!blocked && target.feeder !== null) {
         const feeder = this.net.lanes[target.feeder];
@@ -1536,7 +2271,12 @@ export class World {
         if (leadId !== undefined) {
           const lead = this.cars[leadId];
           const distance = feeder.length - lead.s + target.sAt;
-          const approach = distance / Math.max(lead.v, IDM.v0 * 0.75);
+          const approach = timeToCover(
+            distance,
+            lead.v,
+            lead.power.a,
+            this.speedOf(lead, lead.lane),
+          );
           /*
            * The gap this vehicle needs, not the gap a car would need. Also add
            * the oncoming vehicle's own length: a bus bearing down on the point
@@ -1544,7 +2284,7 @@ export class World {
            * metres are extra seconds it will keep arriving for.
            */
           const needed =
-            criticalGapFor(kind) +
+            criticalGapFor(car) +
             (VEHICLE[lead.kind].length - VEHICLE.car.length) / IDM.v0;
           if (approach < needed) blocked = true;
         }
@@ -1563,10 +2303,19 @@ export class World {
    * and a tight turn's ceiling is below a truck's — whichever binds, binds.
    */
   private speedOf(car: Car, laneId: LaneId): number {
-    const own = VEHICLE[car.kind].v0;
+    const own = VEHICLE[car.kind].v0 * car.driver.v0Scale;
     const lane = this.net.lanes[laneId];
     if (lane.kind !== "connector" || !lane.turn) return own;
-    return Math.min(own, TURN_SPEED[lane.turn]);
+
+    /*
+     * The turn cap moves with the driver too, but by less than their desired
+     * speed does. A hurried driver does take a corner faster than a cautious
+     * one; what they cannot do is take it 8% faster than the geometry allows,
+     * because the limit there is the radius of the connector and not their
+     * patience.
+     */
+    const turnScale = 1 + (car.driver.v0Scale - 1) * TURN_SPEED_TEMPERAMENT;
+    return Math.min(own, TURN_SPEED[lane.turn] * turnScale);
   }
 
   private advanceLanes(): void {
@@ -1637,18 +2386,46 @@ export class World {
    * the information is worth anything to somebody watching.
    */
   turnIntent(car: Car): TurnKind | null {
+    /*
+     * Mid-lane-change, which takes precedence over any turn further on: it is
+     * happening now, it is the thing the traffic around this car needs to know
+     * about, and a driver only has the two indicators. `changing` is -1 toward
+     * the centreline, which is the driver's left.
+     */
+    if (car.changing !== 0) return car.changing < 0 ? "left" : "right";
+
     const lane = this.net.lanes[car.lane];
+    const next = car.route[car.routeIdx + 1];
 
     // Mid-turn: keep indicating until the movement is complete.
     if (lane.kind === "connector") {
-      return lane.turn === "straight" ? null : lane.turn;
+      if (lane.turn !== null && lane.turn !== "straight") return lane.turn;
+      /*
+       * Going straight through this connector, but the route turns immediately
+       * out of the far side of it. A junction laid out as two connectors back to
+       * back is one manoeuvre to anybody watching, and going dark across the
+       * middle of it reads as the driver changing their mind.
+       */
+      if (next !== undefined && this.net.lanes[next].kind === "connector") {
+        const onward = this.net.lanes[next].turn;
+        if (onward !== null && onward !== "straight") return onward;
+      }
+      return null;
     }
 
-    const next = car.route[car.routeIdx + 1];
     if (next === undefined) return null;
     const turn = this.net.lanes[next].turn;
     if (turn === null || turn === "straight") return null;
 
-    return lane.length - car.s <= INDICATE_DISTANCE ? turn : null;
+    /*
+     * Distance matters, and so does speed. A fixed distance means a car crawling
+     * at the back of a queue indicates from the far end of the block — long
+     * before the information is any use, and long enough that half the queue is
+     * blinking at once. Roughly three seconds of travel is what a real driver
+     * gives, with a floor so a stationary car at the head of the queue is still
+     * showing where it is about to go.
+     */
+    const at = Math.max(INDICATE_MIN, Math.min(INDICATE_DISTANCE, car.v * INDICATE_SECONDS));
+    return lane.length - car.s <= at ? turn : null;
   }
 }

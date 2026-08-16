@@ -1,5 +1,6 @@
 import type { LevelDef } from "../sim/types";
 import { CURVE_TEST } from "./curveTest";
+import { LANE_TEST } from "./laneTest";
 import { T_JUNCTION } from "./tJunction";
 import { CROSSROADS } from "./crossroads";
 import { FIVE_WAYS } from "./fiveWays";
@@ -33,9 +34,10 @@ export const LEVELS: LevelDef[] = [
   // Real places, imported from OpenStreetMap. One level per cached area, so
   // they appear and disappear with the JSON files in ./osm.
   ...OSM_LEVELS,
-  // Dev builds carry the curved-geometry proving ground as an extra level; it
-  // never ships. (`?.` so the sim harness can import this file under plain Node.)
-  ...(import.meta.env?.DEV ? [CURVE_TEST] : []),
+  // Dev builds carry the geometry and lane-changing proving grounds as extra
+  // levels; neither ships. (`?.` so the sim harness can import this file under
+  // plain Node.)
+  ...(import.meta.env?.DEV ? [CURVE_TEST, LANE_TEST] : []),
 ];
 
-export { T_JUNCTION, CROSSROADS, FIVE_WAYS, FOUR_CORNERS };
+export { T_JUNCTION, CROSSROADS, FIVE_WAYS, FOUR_CORNERS, LANE_TEST };

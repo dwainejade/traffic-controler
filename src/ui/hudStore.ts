@@ -1,31 +1,6 @@
 import { create } from "zustand";
 import { PINNED_HOUR, hourOfDay } from "../art/daylight";
 import type { FailReason, GameState, World } from "../sim/world";
-import type { SignalState } from "../sim/junction";
-import type { NodeId } from "../sim/types";
-
-export type JunctionHud = {
-  id: NodeId;
-  phases: string[];
-  current: number;
-  signal: SignalState;
-  /** Cars waiting on all approaches, for the at-a-glance pressure readout. */
-  queue: number;
-  /** Green seconds per phase — the program this junction is actually running. */
-  splits: number[];
-  cycle: number;
-  offset: number;
-  groupId: string | null;
-  /** True when this member deviates from its group's parent program. */
-  hasOverride: boolean;
-};
-
-export type GroupHud = {
-  id: string;
-  name: string;
-  members: NodeId[];
-  cycle: number;
-};
 
 /** Optional map overlays, toggled from the layers menu. */
 export type LayerState = {
@@ -41,6 +16,8 @@ export type LayerState = {
   daynight: boolean;
   /** Cars at the kerb. */
   parking: boolean;
+  /** Fascia signs on the businesses the source map knew about. */
+  shopSigns: boolean;
   /** Swap the fixed orthographic camera for a perspective one. */
   perspective: boolean;
   /** Blur what the player isn't looking at. */
@@ -49,6 +26,8 @@ export type LayerState = {
   bloom: boolean;
   /** Autonomous low aerial flyover, edge to edge. Press C to jump to a new path. */
   cinematicCamera: boolean;
+  /** First-person camera. WASD walks at eye height, F flies, Shift sprints. */
+  walkCamera: boolean;
 };
 
 export type LayerName = keyof LayerState;
@@ -70,6 +49,11 @@ export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
     name: "streetLights",
     label: "Street lights",
     hint: "Lamp columns along every street. They come on with the clock",
+  },
+  {
+    name: "shopSigns",
+    label: "Shop signs",
+    hint: "Fascia boards on the shops, in their own colours. Imported maps only — a hand-built level has no businesses on it",
   },
   {
     name: "daynight",
@@ -101,6 +85,11 @@ export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
     label: "Cinematic camera",
     hint: "Slow aerial flyover, edge to edge. Press C for a new path, or drag/scroll/WASD to cancel",
   },
+  {
+    name: "walkCamera",
+    label: "Walk mode",
+    hint: "Stand in the street. V toggles, click to look, WASD moves, F flies, Shift sprints. Esc frees the mouse for the HUD, Esc again leaves",
+  },
 ];
 
 /**
@@ -112,13 +101,6 @@ export type HudState = {
   active: number;
   elapsed: number;
   meanWait: number;
-  junctions: JunctionHud[];
-  groups: GroupHud[];
-  /** Player's current junction. UI-owned: publishHud must never overwrite it. */
-  selected: NodeId | null;
-  /** While true, clicking junctions adds them to `linkSelection`. UI-owned. */
-  linking: boolean;
-  linkSelection: NodeId[];
   /** Time multiplier. UI-owned. 0 pauses. */
   speed: number;
   observing: boolean;
@@ -128,13 +110,20 @@ export type HudState = {
   delayBudget: number | null;
   /** Mean seconds lost per car currently on the map. */
   networkDelay: number;
-  /** Junction the camera should fly to. The nonce re-triggers a repeat click. */
-  focus: { id: NodeId; nonce: number } | null;
   /** Cars per second arriving, mirrored from the world so the sandbox can tune it. */
   demand: number;
   /**
-   * Map layers the player can turn on and off. UI-owned, like `selected` and
-   * `speed`: `publishHud` must never overwrite them.
+   * How much of the network is being simulated, and over what radius. Dev
+   * readout only — this is the one part of the region work with no other visible
+   * evidence, since a well-behaved region looks exactly like simulating
+   * everything.
+   */
+  simLanes: number;
+  simLanesTotal: number;
+  simRadius: number | null;
+  /**
+   * Map layers the player can turn on and off. UI-owned, like `speed`:
+   * `publishHud` must never overwrite them.
    */
   layers: LayerState;
   /** Hours past midnight on the map's clock, for the HUD readout. */
@@ -150,19 +139,16 @@ export const useHud = create<HudState>(() => ({
   active: 0,
   elapsed: 0,
   meanWait: 0,
-  junctions: [],
-  groups: [],
-  selected: null,
-  linking: false,
-  linkSelection: [],
   speed: 1,
   observing: false,
   collisions: 0,
   delayHours: 0,
   delayBudget: null,
   networkDelay: 0,
-  focus: null,
   demand: 1,
+  simLanes: 0,
+  simLanesTotal: 0,
+  simRadius: null,
   layers: {
     labels: true,
     streetSigns: true,
@@ -170,10 +156,12 @@ export const useHud = create<HudState>(() => ({
     signals: true,
     daynight: true,
     parking: true,
+    shopSigns: true,
     perspective: true,
     depthOfField: true,
     bloom: true,
     cinematicCamera: false,
+    walkCamera: false,
   },
   timeOfDay: hourOfDay(0),
   state: "running",
@@ -189,43 +177,15 @@ export function toggleLayer(name: LayerName): void {
   // Aerial motion needs real parallax — flat ortho would just look like the
   // map sliding around, not a camera moving through space.
   if (name === "cinematicCamera" && next) patch.perspective = true;
-  useHud.setState({ layers: { ...layers, ...patch } });
-}
-
-export function selectJunction(id: NodeId): void {
-  const { linking, linkSelection } = useHud.getState();
-
-  // While linking, a click toggles membership of the set being built rather
-  // than moving the editor's focus.
-  if (linking) {
-    useHud.setState({
-      linkSelection: linkSelection.includes(id)
-        ? linkSelection.filter((m) => m !== id)
-        : [...linkSelection, id],
-    });
-    return;
+  // Same for the walker: standing in the street only means anything with real
+  // vanishing points. The two camera modes both own the camera transform
+  // outright, so only one of them can be on at a time.
+  if (name === "walkCamera" && next) {
+    patch.perspective = true;
+    patch.cinematicCamera = false;
   }
-  useHud.setState({ selected: id });
-}
-
-let focusNonce = 0;
-
-/** Send the camera to a junction — used by the congestion list. */
-export function focusJunction(id: NodeId): void {
-  useHud.setState({ selected: id, focus: { id, nonce: ++focusNonce } });
-}
-
-export function startLinking(seed: NodeId | null): void {
-  useHud.setState({ linking: true, linkSelection: seed ? [seed] : [] });
-}
-
-export function cancelLinking(): void {
-  useHud.setState({ linking: false, linkSelection: [] });
-}
-
-/** Nothing selected: the map is just a city again, and the editors go away. */
-export function clearSelection(): void {
-  useHud.setState({ selected: null });
+  if (name === "cinematicCamera" && next) patch.walkCamera = false;
+  useHud.setState({ layers: { ...layers, ...patch } });
 }
 
 /** Fastest time multiple the slider reaches. */
@@ -269,65 +229,34 @@ if (import.meta.env.DEV) {
   Object.assign(globalThis, { hudStore: useHud });
 }
 
+/**
+ * Mirror the simulation into React, a few times a second.
+ *
+ * Deliberately whole-map summary numbers only. This used to also publish a row
+ * per junction — phases, splits, offset, and a queue length summed over every
+ * inbound lane — because the HUD let you pick a junction and re-time it. That
+ * walk was proportional to the size of the network rather than to anything on
+ * screen, which on a city-sized map meant rebuilding an array of a couple of
+ * thousand objects six times a second to render a list nobody was reading.
+ */
 export function publishHud(world: World): void {
-  const junctions: JunctionHud[] = [];
-
-  const groups: GroupHud[] = [...world.groups.values()].map((g) => ({
-    id: g.id,
-    name: g.name,
-    members: [...g.members],
-    cycle: world.cycleFor(g.members[0]),
-  }));
-
-  for (const [id, j] of world.junctions) {
-    let queue = 0;
-    for (const arm of world.net.armsByJunction.get(id) ?? []) {
-      for (const laneId of arm.inbound) {
-        queue += world.net.lanes[laneId].cars.length;
-      }
-    }
-
-    junctions.push({
-      id,
-      phases: j.phases.map((p) => p.name),
-      current: j.current,
-      signal: j.state,
-      queue,
-      splits: [...world.programOf(j).splits],
-      cycle: world.cycleFor(id),
-      offset: j.offset,
-      groupId: j.groupId,
-      hasOverride: j.groupId
-        ? (world.groups.get(j.groupId)?.overrides.has(id) ?? false)
-        : false,
-    });
-  }
-
   const previous = useHud.getState();
+  const region = world.regionStats();
 
   useHud.setState({
     delivered: world.stats.delivered,
     active: world.stats.active,
     elapsed: world.stats.elapsed,
     meanWait: world.stats.meanWait,
-    junctions,
-    groups,
-    /*
-     * Selection is the player's, and "nothing selected" is a real state — it is
-     * how the city gets to be just a city, with the editors out of the way. So
-     * this only ever preserves what the player chose; it never picks for them.
-     */
-    selected:
-      previous.selected !== null &&
-      junctions.some((j) => j.id === previous.selected)
-        ? previous.selected
-        : null,
     observing: world.observing,
     collisions: world.stats.collisions,
     delayHours: world.stats.delayHours,
     delayBudget: world.level.delayBudget ?? null,
     networkDelay: world.stats.networkDelay,
     demand: world.demand,
+    simLanes: region.lanes,
+    simLanesTotal: region.totalLanes,
+    simRadius: world.regionRadius,
     timeOfDay: previous.layers.daynight
       ? hourOfDay(world.signalClock)
       : PINNED_HOUR,

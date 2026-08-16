@@ -302,3 +302,33 @@
     width: auto;
   }
 }
+
+/*
+ * Benchmark size buttons. Dev-only, so they get a plain utilitarian row rather
+ * than the level rows' styling — these are an instrument, not a place to go.
+ */
+.bench-sizes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 12px 8px;
+}
+
+.bench-size {
+  flex: 1 1 auto;
+  padding: 5px 8px;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 7px;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+  opacity: 0.75;
+  cursor: pointer;
+}
+
+.bench-size:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.05);
+}
