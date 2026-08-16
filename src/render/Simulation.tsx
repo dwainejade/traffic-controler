@@ -15,7 +15,7 @@ import {
 import { LAYER } from "./layers";
 import { useGlow } from "./glow";
 import { publishHud, useHud } from "../ui/hudStore";
-import { viewCentre } from "./viewCentre";
+import { viewCentre, viewRadius } from "./viewCentre";
 import { simRadiusFor } from "../sim/region";
 
 /** Never simulate more than this much wall time in one frame after a stall. */
@@ -45,45 +45,6 @@ const MAX_TRUCKS = 300;
 const MAX_BUSES = 200;
 
 const HUD_INTERVAL = 1 / 6;
-
-/**
- * Radius of ground the camera can currently see, near enough.
- *
- * Only ever has to be an over-estimate: too large simulates a little more than
- * is on screen, too small deletes cars somebody can see. The margin covers the
- * 55° tilt, which lands a circle on screen as an ellipse stretched along the
- * view direction.
- */
-function viewRadius(
-  camera: THREE.Camera,
-  width: number,
-  height: number,
-): number {
-  if (camera instanceof THREE.OrthographicCamera) {
-    const halfW = width / 2 / camera.zoom;
-    const halfH = height / 2 / camera.zoom;
-    return Math.hypot(halfW, halfH) * TILT_MARGIN;
-  }
-
-  if (camera instanceof THREE.PerspectiveCamera) {
-    /*
-     * How much a perspective camera sees is how far away it is, so measure that
-     * against the point it is looking at rather than inferring it from height.
-     * That works for the orbiting camera and the walker alike: orbiting, the
-     * distance is hundreds of metres and the region covers the framing; standing
-     * in the street it is a few metres and the region falls to its floor.
-     */
-    const distance = Math.max(camera.position.distanceTo(viewCentre.point), 1);
-    const halfH = distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
-    const halfW = halfH * (width / Math.max(height, 1));
-    return Math.hypot(halfW, halfH) * TILT_MARGIN;
-  }
-
-  return 0;
-}
-
-/** Slack over the half-diagonal, for the tilt and for being wrong. */
-const TILT_MARGIN = 1.3;
 
 /** Indicators flash at roughly 1.5 Hz, as real ones do. */
 const BLINK_HZ = 1.5;

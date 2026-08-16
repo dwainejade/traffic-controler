@@ -4,7 +4,7 @@ import * as THREE from "three";
 import type { LevelDef } from "../sim/types";
 import { toggleLayer } from "../ui/hudStore";
 import { typing } from "../ui/typing";
-import { viewCentre } from "./viewCentre";
+import { setViewCentre, viewCentre } from "./viewCentre";
 
 /** Metres. Standing eye height, so kerbs and signal heads read at their real scale. */
 const EYE_HEIGHT = 1.7;
@@ -26,6 +26,9 @@ const MAX_STEP = 0.1;
 /** Radians of turn per pixel of mouse movement. */
 const SENSITIVITY = 0.0022;
 const MAX_PITCH = THREE.MathUtils.degToRad(89);
+
+/** How far down the eyeline the walker's attention sits, in metres. */
+const WALK_FOCUS = 25;
 
 /**
  * First-person camera. WASD moves on the heading you are facing, the mouse
@@ -256,6 +259,22 @@ export function WalkCamera({ level }: { level: LevelDef }) {
       : EYE_HEIGHT;
 
     camera.rotation.set(pitch.current, yaw.current, 0, "YXZ");
+
+    /*
+     * Where the walker is, for everything that follows the view around.
+     *
+     * This used only to be *read* here, to decide where to put you down when
+     * walk mode opened. Now the simulated region and the shadow camera both
+     * track it, and neither can track a point the walker left behind: walking
+     * away from it took you out of your own shadow box and eventually out of the
+     * region being simulated, so the traffic thinned out around you the further
+     * you went. Written a little ahead of the eye rather than at it, because
+     * what matters is the street you are looking down.
+     */
+    setViewCentre(
+      camera.position.x - Math.sin(yaw.current) * WALK_FOCUS,
+      camera.position.z - Math.cos(yaw.current) * WALK_FOCUS,
+    );
   });
 
   return null;
