@@ -223,6 +223,25 @@ export type Shopfront = {
   category: string
 }
 
+/**
+ * A rail line surveyed from OSM (`railway=rail`/`light_rail`), as an open
+ * [x, z] polyline — unlike a road, a track has no junction model and no
+ * direction, just a path. Presentational only: nothing runs on it.
+ */
+export type RailLine = {
+  points: [number, number][]
+}
+
+/**
+ * A train station surveyed from OSM (`railway=station`/`halt`), as the single
+ * point OSM gives it. Presentational only, like `Shopfront` — no car or train
+ * in the simulation knows it is there.
+ */
+export type Station = {
+  pos: [number, number]
+  name?: string
+}
+
 export type LevelDef = {
   id: string
   name: string
@@ -298,6 +317,17 @@ export type LevelDef = {
    * clipped by the import box. Presentational only.
    */
   waterBodies?: [number, number][][]
+  /** Rail lines surveyed from OSM. Presentational only. */
+  railLines?: RailLine[]
+  /** Train stations surveyed from OSM. Presentational only. */
+  stations?: Station[]
+  /**
+   * Subway entrance stairs surveyed from OSM (`railway=subway_entrance`) — the
+   * only part of an underground station standing on the street. Presentational
+   * only, and reuses `Station`'s shape rather than a type of its own: a name
+   * and a point is all either one is.
+   */
+  stationEntrances?: Station[]
 }
 
 /** Default seconds of traffic to pre-run before a level is handed over. */

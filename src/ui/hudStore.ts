@@ -32,6 +32,8 @@ export type LayerState = {
   parking: boolean;
   /** Fascia signs on the businesses the source map knew about. */
   shopSigns: boolean;
+  /** Rail lines and stations the source map knew about. */
+  rail: boolean;
   /** Swap the fixed orthographic camera for a perspective one. */
   perspective: boolean;
   /** Blur what the player isn't looking at. */
@@ -78,6 +80,11 @@ export const LAYERS: { name: LayerName; label: string; hint: string }[] = [
     name: "shopSigns",
     label: "Shop signs",
     hint: "Fascia boards on the shops, in their own colours. Imported maps only — a hand-built level has no businesses on it",
+  },
+  {
+    name: "rail",
+    label: "Rail",
+    hint: "Tracks and station platforms. Imported maps only — a hand-built level has no railway on it",
   },
   {
     name: "daynight",
@@ -192,6 +199,7 @@ export const useHud = create<HudState>(() => ({
     daynight: true,
     parking: true,
     shopSigns: true,
+    rail: true,
     perspective: true,
     depthOfField: true,
     bloom: true,

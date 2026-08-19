@@ -3,9 +3,11 @@ import type {
   LevelDef,
   MapNode,
   NodeId,
+  RailLine,
   RoadClass,
   RoadDef,
   Shopfront,
+  Station,
   ZoneDef,
 } from "../../sim/types";
 import { brandKey } from "../../art/brands";
@@ -80,6 +82,40 @@ const DRIVEABLE = new Set([
   "secondary_link",
   "tertiary_link",
 ]);
+
+/**
+ * Rail with a track to draw. `tram` is excluded — it shares the carriageway
+ * rather than owning a right of way of its own, so drawing one would mean
+ * laying a second ribbon down the middle of a street already drawn. `subway`
+ * is included even though most of it is a tunnel with nothing to draw,
+ * because the elevated stretches are `subway` too and `elevatedSpan` below is
+ * what tells the two apart.
+ */
+const RAIL_WAYS = new Set(["rail", "light_rail", "subway"]);
+
+/** Point stations, matching the query — not every platform edge or entrance. */
+const STATION_KINDS = new Set(["station", "halt"]);
+
+/**
+ * Whether a rail way runs somewhere a train could be seen from the street —
+ * on an el, a viaduct, or open cut — as opposed to in a tunnel underneath it.
+ *
+ * OSM tags the exception rather than the rule for each mode, and the two
+ * rules point opposite ways: mainline `rail`/`light_rail` is above ground
+ * unless tagged `tunnel`, the same as a road is unless tagged `bridge`. A
+ * `subway`, though, is a tunnel by definition of the mode — the els over
+ * Brooklyn and Queens are the tagged exception, carrying `bridge=yes` or a
+ * positive `layer` the way an overpass does. Untagged subway is the ordinary
+ * case and it is underground.
+ */
+function elevatedSpan(tags: Tags): boolean {
+  const layer = Number(tags.layer);
+  const tunnel = tags.tunnel === "yes" || tags.tunnel === "building_passage";
+  const bridge = tags.bridge === "yes" || tags.bridge === "viaduct";
+  if (tunnel) return false;
+  if (bridge || layer > 0) return true;
+  return tags.railway !== "subway";
+}
 
 /**
  * Junction nodes closer together than this are one intersection that OSM
@@ -329,6 +365,48 @@ function clipPolyToBox(poly: P[], halfX: number, halfZ: number): P[] {
     }
   }
   return output;
+}
+
+/**
+ * `pts` broken into the runs that lie inside the box, each end interpolated
+ * exactly onto the edge it crosses.
+ *
+ * Unlike `clipPolyToBox`, this walks an open path rather than closing a ring,
+ * and can hand back more than one run — a branch line that clips the corner of
+ * the box, or simply keeps going in the source data well past the edge and is
+ * of no further interest once it has left. A segment that crosses the box
+ * without either end inside it (cutting a corner) is rare enough for a survey
+ * at this scale, and presentational enough, to skip rather than chase with a
+ * second exit test.
+ */
+function clipPolylineToBox(pts: P[], halfX: number, halfZ: number): P[][] {
+  const inside = (p: P) => Math.abs(p.x) <= halfX && Math.abs(p.z) <= halfZ;
+  const runs: P[][] = [];
+  let current: P[] = [];
+
+  if (pts.length > 0 && inside(pts[0])) current.push(pts[0]);
+
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const aIn = inside(a);
+    const bIn = inside(b);
+
+    if (aIn && bIn) {
+      current.push(b);
+    } else if (aIn && !bIn) {
+      const t = exitFraction(a, b, halfX, halfZ);
+      current.push({ x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t });
+      runs.push(current);
+      current = [];
+    } else if (!aIn && bIn) {
+      const t = exitFraction(b, a, halfX, halfZ);
+      current.push({ x: b.x + (a.x - b.x) * t, z: b.z + (a.z - b.z) * t });
+      current.push(b);
+    }
+  }
+  if (current.length >= 2) runs.push(current);
+  return runs;
 }
 
 // ----------------------------------------------------------------- lane tags
@@ -1368,6 +1446,59 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     }
   }
 
+  /*
+   * --- 6c. Rail lines a train can be seen on. Open polylines, clipped at the
+   * box edge the same way a road edge is (`exitFraction`) rather than kept
+   * whole like a building or a park: a track has no shape to preserve, only a
+   * path, and one running off the card is of no more interest past the point
+   * it leaves. A tunnelled span is dropped rather than clipped — see
+   * `elevatedSpan` — since there is nothing over it to draw.
+   */
+  const railLines: RailLine[] = [];
+  for (const way of ways) {
+    if (!way.tags || !RAIL_WAYS.has(way.tags.railway ?? "")) continue;
+    if (!elevatedSpan(way.tags)) continue;
+    const ids = way.nodes.filter((id) => rawNodes.has(id));
+    if (ids.length < 2) continue;
+    for (const run of clipPolylineToBox(ids.map(at), halfX, halfZ)) {
+      railLines.push({ points: run.map((p) => [p.x, p.z] as [number, number]) });
+    }
+  }
+
+  /*
+   * --- 6d. Stations. One point apiece, wherever OSM put it — a node for most,
+   * the centre of a mapped platform area for the rest, the same `pointOf` a
+   * shop's location comes from. Includes underground stations: the platform
+   * itself is out of sight, but the point is still where the station stands.
+   */
+  const stations: Station[] = [];
+  for (const el of file.elements) {
+    const kind = el.tags?.railway;
+    if (!kind || !STATION_KINDS.has(kind)) continue;
+    const point = pointOf(el, project, at);
+    if (!point) continue;
+    if (Math.abs(point.x) > halfX + margin || Math.abs(point.z) > halfZ + margin) continue;
+    stations.push({
+      pos: [point.x, point.z],
+      ...(el.tags?.name ? { name: el.tags.name } : {}),
+    });
+  }
+
+  /*
+   * --- 6e. Subway entrances — the one part of an underground station that
+   * actually stands on the street. Nodes only; OSM does not map these as areas.
+   */
+  const stationEntrances: Station[] = [];
+  for (const el of file.elements) {
+    if (el.type !== "node" || el.tags?.railway !== "subway_entrance") continue;
+    const point = project(el.lat, el.lon);
+    if (Math.abs(point.x) > halfX + margin || Math.abs(point.z) > halfZ + margin) continue;
+    stationEntrances.push({
+      pos: [point.x, point.z],
+      ...(el.tags?.name ? { name: el.tags.name } : {}),
+    });
+  }
+
   /**
    * `t` along segment ab where it crosses segment cd, or null if it doesn't.
    * Used to find where a road's centreline enters or leaves a water polygon.
@@ -1779,6 +1910,9 @@ export function importOsm(file: OsmFile, opts: ImportOptions): LevelDef {
     roads,
     zones,
     ...(waterBodies.length ? { waterBodies } : {}),
+    ...(railLines.length ? { railLines } : {}),
+    ...(stations.length ? { stations } : {}),
+    ...(stationEntrances.length ? { stationEntrances } : {}),
     seed: opts.seed ?? 20260810,
     quota: 0,
     timeLimit: 0,

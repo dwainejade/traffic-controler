@@ -16,6 +16,8 @@ import { RoadNetwork } from "./RoadNetwork";
 import { Buildings } from "./Buildings";
 import { Footprints } from "./Footprints";
 import { Shopfronts } from "./Shopfronts";
+import { RailTracks } from "./RailTracks";
+import { Stations, StationEntrances } from "./Stations";
 import { Trees } from "./Trees";
 import { scatterLevel } from "./scatter";
 import { Controls } from "./Controls";
@@ -415,6 +417,7 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
   const showStreetSigns = useHud((s) => s.layers.streetSigns);
   const showStreetLights = useHud((s) => s.layers.streetLights);
   const showShops = useHud((s) => s.layers.shopSigns);
+  const showRail = useHud((s) => s.layers.rail);
   const showSignals = useHud((s) => s.layers.signals);
   const showParking = useHud((s) => s.layers.parking);
   const perspective = useHud((s) => s.layers.perspective);
@@ -500,6 +503,13 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
 
       <Ground level={level} />
       <Parks zones={level.zones} />
+      {showRail && (
+        <>
+          <RailTracks level={level} />
+          <Stations level={level} />
+          <StationEntrances level={level} />
+        </>
+      )}
       <RoadNetwork level={level} />
       {/* Over the road: a median stands on a kerb above the carriageway. */}
       <Medians zones={level.zones} />

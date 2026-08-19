@@ -27,7 +27,7 @@ const STORE = "tiles";
  * to the query would otherwise be invisible on every area already stored —
  * which is exactly the kind of divergence that takes a day to spot.
  */
-const QUERY_VERSION = 1;
+const QUERY_VERSION = 2;
 
 /** How long a tile is trusted. OSM moves; a city does not move fast. */
 const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;

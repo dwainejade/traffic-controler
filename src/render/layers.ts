@@ -25,6 +25,10 @@ export const LAYER = {
   water: at(1),
   /** Parks and grass: painted on the card, under the streets that cross them. */
   green: at(2),
+  /** Rail ballast and tracks, painted on the card like the green space is. */
+  rail: at(2.3),
+  /** Station platforms, a hair above the tracks that run past them. */
+  station: at(2.6),
   /** Kerb lip, under everything on the street side. */
   curb: at(3),
   junctionCurb: at(4),

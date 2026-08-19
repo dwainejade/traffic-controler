@@ -244,21 +244,23 @@ export function scatterLevel(level: LevelDef): {
     const centre = roadCentreline(level, road)
     const len = polyLength(centre)
     const edges = roadEdges(road)
-    const VERGE = 3.6
+    // Hugging the kerb, the way a real street tree pit sits — the rest of the
+    // sidewalk, out toward the buildings, stays clear for people to walk.
+    const VERGE = 1.8
 
     const PITCH = 9
     for (let d = 6; d < len - 4; d += PITCH) {
       const p = samplePoly(centre, d)
       for (const side of [-1, 1]) {
         if (rand() < 0.25) continue
-        const jitter = (rand() - 0.5) * 2.5
+        const jitter = (rand() - 0.5) * 1.2
         // `side` is +1 on the road's left, and the lateral convention here is
         // positive to the right, hence the sign flip on the right-hand kerb.
         const kerb = side > 0 ? -edges.left : edges.right
         const offset = kerb + VERGE
         const x = p.x - p.tz * side * (offset + jitter)
         const z = p.z + p.tx * side * (offset + jitter)
-        if (!isClear(level, x, z, 2.5)) continue
+        if (!isClear(level, x, z, 0.8)) continue
         if (insideBuilding(x, z)) continue
         trees.push({
           x,

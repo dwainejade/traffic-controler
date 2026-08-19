@@ -80,6 +80,17 @@ export const PALETTE = {
   buildingTints: ["#E9D8D0", "#DDDEE1", "#EDE6D8", "#E4E2DD"] as const,
 
   accent: "#A8D8D0",
+
+  /**
+   * Rail right-of-way — a stone tone rather than the road's asphalt grey, so a
+   * line of track through the city reads as its own kind of infrastructure
+   * instead of a narrow street.
+   */
+  rail: "#9C948A",
+  /** The rails themselves, a thin steel line down the ballast. */
+  railTrack: "#6C6660",
+  /** Station platforms — surveyed points, drawn as a small paved apron. */
+  station: "#C9C2B6",
 } as const;
 
 /**

@@ -104,7 +104,7 @@ const MIN_ATTEMPT_MS = 15_000;
 const RETRY_DELAY_MS = 2_500;
 
 /*
- * Four sets, one query:
+ * Seven sets, one query:
  *   - the driveable street network, with `>` to pull in each way's nodes so we
  *     have coordinates and can spot shared nodes (which is what an intersection
  *     *is* in OSM — ways that share a node, not ways that merely cross);
@@ -116,7 +116,18 @@ const RETRY_DELAY_MS = 2_500;
  *     rather than the building itself, which is why they need asking for
  *     separately; `out center` covers the minority mapped as their own area, and
  *     hands back a single point for it instead of a ring the importer would only
- *     take the middle of anyway.
+ *     take the middle of anyway;
+ *   - rail: `rail` and `light_rail`, which run at street level, plus `subway`
+ *     — asked for in full even though most of it is a tunnel with nothing to
+ *     draw, because the elevated stretches (the els over Brooklyn and Queens)
+ *     are `subway` too and there is no way to tell which without the tags.
+ *     `tram` stays out; it shares the carriageway rather than owning a right of
+ *     way, so it is street, not track. The importer is what decides underground
+ *     from elevated, off `tunnel`/`bridge`/`layer`, the same way it already
+ *     does for a road's deck;
+ *   - stations and halts along them, the same `out center` way shops use;
+ *   - subway entrances — the stair down that is the only part of an
+ *     underground station actually standing on the street.
  *
  * `way(bbox)` returns whole ways that merely touch the box, so the geometry
  * runs past the edges; the importer clips it and puts sources on the boundary.
@@ -173,6 +184,22 @@ out skel qt;
   way["amenity"~"^(${STOREFRONT_AMENITIES.join("|")})$"](${box});
 );
 out center;
+
+(
+  way["railway"~"^(rail|light_rail|subway)$"](${box});
+);
+out body;
+>;
+out skel qt;
+
+(
+  node["railway"~"^(station|halt)$"](${box});
+  way["railway"~"^(station|halt)$"](${box});
+);
+out center;
+
+node["railway"="subway_entrance"](${box});
+out body;
 `;
 }
 
