@@ -40,7 +40,11 @@ import { StreetLights } from "./StreetLights";
 import { useGlowing } from "./glow";
 import { SignalHeads } from "./SignalHeads";
 import type { World } from "../sim/world";
-import { useHud } from "../ui/hudStore";
+import {
+  useHud,
+  WALK_FOCUS_DISTANCE_MAX,
+  WALK_FOCUS_DISTANCE_MIN,
+} from "../ui/hudStore";
 import { PerspectiveCamera, Stats } from "@react-three/drei";
 import { benchmark } from "./bench";
 import { benchLevel } from "../levels/bench";
@@ -232,9 +236,22 @@ function DevHandle() {
  * look (2).
  */
 const FOCUS_RANGE_OUT = 1000;
-const FOCUS_RANGE_IN = 60;
 const BOKEH_SCALE_OUT = 0.2;
-const BOKEH_SCALE_IN = 2;
+
+/**
+ * The zoomed-in/close-up end of the band, keyed to the "Focus distance"
+ * slider instead of a fixed constant — the miniature-model look (a narrow
+ * band, strong blur) is only right at the slider's near setting. A real lens
+ * gets *more* forgiving the farther out it focuses, not less, so the band
+ * widens and the blur eases as the slider moves out. This end is what the
+ * slider governs everywhere: zoomed all the way in on the orbit camera and
+ * walking both land here, since both put the "far" end (`FOCUS_RANGE_OUT`,
+ * a whole readable map) out of reach.
+ */
+const FOCUS_RANGE_IN_NEAR = 30;
+const FOCUS_RANGE_IN_FAR = 260;
+const BOKEH_SCALE_IN_NEAR = 1.4;
+const BOKEH_SCALE_IN_FAR = 0.25;
 
 /**
  * Depth of field, focused on whatever the orbit controls are pivoting
@@ -265,9 +282,6 @@ const BLOOM_INTENSITY = 1.5;
 const BLOOM_THRESHOLD = 0.25;
 const BLOOM_SMOOTHING = 0.4;
 
-/** Metres ahead of the walker the lens focuses — about the far kerb. */
-const WALK_FOCUS_DISTANCE = 25;
-
 function PostFX({
   half,
   depthOfField,
@@ -284,6 +298,7 @@ function PostFX({
   const dof = useRef<DepthOfFieldEffect>(null);
   const glowing = useGlowing();
   const walk = useHud((s) => s.layers.walkCamera);
+  const walkFocusDistance = useHud((s) => s.walkFocusDistance);
   const focusPoint = useMemo(() => new THREE.Vector3(), []);
 
   const zoomMin = useMemo(() => minZoom(half), [half]);
@@ -303,32 +318,57 @@ function PostFX({
         camera.getWorldDirection(focusPoint);
         effect.target
           .copy(camera.position)
-          .addScaledVector(focusPoint, WALK_FOCUS_DISTANCE);
+          .addScaledVector(focusPoint, walkFocusDistance);
       }
     }
 
-    // 0 = fully zoomed out, 1 = fully zoomed in. No orbit target (e.g. the
-    // cinematic flyover, which unmounts Controls) reads as zoomed out. Walking
-    // is the opposite extreme — you are as close in as the map ever gets.
-    let t = walk ? 1 : 0;
-    if (camera instanceof THREE.OrthographicCamera) {
-      t = (camera.zoom - zoomMin) / (MAX_ZOOM - zoomMin);
-    } else if (controls) {
-      const distance = camera.position.distanceTo(controls.target);
-      t = (distMax - distance) / (distMax - MIN_DISTANCE);
-    }
-    t = THREE.MathUtils.clamp(t, 0, 1);
+    // The slider's own position, 0 at its near end and 1 at its far end —
+    // this is what the close-up end of the band reads from, in every mode.
+    const sliderT = THREE.MathUtils.clamp(
+      (walkFocusDistance - WALK_FOCUS_DISTANCE_MIN) /
+        (WALK_FOCUS_DISTANCE_MAX - WALK_FOCUS_DISTANCE_MIN),
+      0,
+      1,
+    );
+    const focusRangeIn = THREE.MathUtils.lerp(
+      FOCUS_RANGE_IN_NEAR,
+      FOCUS_RANGE_IN_FAR,
+      sliderT,
+    );
+    const bokehScaleIn = THREE.MathUtils.lerp(
+      BOKEH_SCALE_IN_NEAR,
+      BOKEH_SCALE_IN_FAR,
+      sliderT,
+    );
 
-    effect.cocMaterial.focusRange = THREE.MathUtils.lerp(
-      FOCUS_RANGE_OUT,
-      FOCUS_RANGE_IN,
-      t,
-    );
-    effect.bokehScale = THREE.MathUtils.lerp(
-      BOKEH_SCALE_OUT,
-      BOKEH_SCALE_IN,
-      t,
-    );
+    if (walk) {
+      // Walking is as close in as the map ever gets, so it sits at the
+      // close-up end outright rather than blending toward it.
+      effect.cocMaterial.focusRange = focusRangeIn;
+      effect.bokehScale = bokehScaleIn;
+    } else {
+      // 0 = fully zoomed out, 1 = fully zoomed in. No orbit target (e.g. the
+      // cinematic flyover, which unmounts Controls) reads as zoomed out.
+      let t = 0;
+      if (camera instanceof THREE.OrthographicCamera) {
+        t = (camera.zoom - zoomMin) / (MAX_ZOOM - zoomMin);
+      } else if (controls) {
+        const distance = camera.position.distanceTo(controls.target);
+        t = (distMax - distance) / (distMax - MIN_DISTANCE);
+      }
+      t = THREE.MathUtils.clamp(t, 0, 1);
+
+      effect.cocMaterial.focusRange = THREE.MathUtils.lerp(
+        FOCUS_RANGE_OUT,
+        focusRangeIn,
+        t,
+      );
+      effect.bokehScale = THREE.MathUtils.lerp(
+        BOKEH_SCALE_OUT,
+        bokehScaleIn,
+        t,
+      );
+    }
   });
 
   return (

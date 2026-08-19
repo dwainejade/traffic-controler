@@ -325,6 +325,20 @@
   pointer-events: none;
 }
 
+.walk-reticle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #f2f6f8;
+  box-shadow: 0 0 0 1px rgba(15, 23, 32, 0.6);
+  z-index: 5;
+  pointer-events: none;
+}
+
 .panel-speed {
   align-items: center;
 }
@@ -535,6 +549,27 @@
 .layers-row input {
   accent-color: #2c3036;
   cursor: pointer;
+}
+
+.layers-slider {
+  cursor: default;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.layers-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.layers-slider-value {
+  min-width: 32px;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 /* --- Bottom sheets ---------------------------------------------------------

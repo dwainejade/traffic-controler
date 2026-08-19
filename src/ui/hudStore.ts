@@ -150,6 +150,11 @@ export type HudState = {
    * `publishHud` must never overwrite them.
    */
   layers: LayerState;
+  /**
+   * Metres ahead of the walker the lens focuses, adjustable from the layers
+   * menu. UI-owned, like `speed`: `publishHud` must never overwrite it.
+   */
+  walkFocusDistance: number;
   /** Hours past midnight on the map's clock, for the HUD readout. */
   timeOfDay: number;
   state: GameState;
@@ -157,6 +162,11 @@ export type HudState = {
   quota: number;
   timeLeft: number;
 };
+
+/** Default, and slider bounds, for `walkFocusDistance`, in metres. */
+export const WALK_FOCUS_DISTANCE_DEFAULT = 25;
+export const WALK_FOCUS_DISTANCE_MIN = 5;
+export const WALK_FOCUS_DISTANCE_MAX = 80;
 
 export const useHud = create<HudState>(() => ({
   delivered: 0,
@@ -188,6 +198,7 @@ export const useHud = create<HudState>(() => ({
     cinematicCamera: false,
     walkCamera: false,
   },
+  walkFocusDistance: WALK_FOCUS_DISTANCE_DEFAULT,
   timeOfDay: hourOfDay(0),
   state: "running",
   failReason: null,
@@ -211,6 +222,14 @@ export function toggleLayer(name: LayerName): void {
   }
   if (name === "cinematicCamera" && next) patch.walkCamera = false;
   useHud.setState({ layers: { ...layers, ...patch } });
+}
+
+export function setWalkFocusDistance(distance: number): void {
+  const clamped = Math.min(
+    WALK_FOCUS_DISTANCE_MAX,
+    Math.max(WALK_FOCUS_DISTANCE_MIN, distance),
+  );
+  useHud.setState({ walkFocusDistance: clamped });
 }
 
 /** Fastest time multiple the slider reaches. */

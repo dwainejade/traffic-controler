@@ -4,11 +4,14 @@ import type { World } from "../sim/world";
 import {
   nudgeSpeed,
   setSpeed,
+  setWalkFocusDistance,
   sliderForSpeed,
   speedForSlider,
   toggleLayer,
   useHud,
   LAYERS,
+  WALK_FOCUS_DISTANCE_MAX,
+  WALK_FOCUS_DISTANCE_MIN,
 } from "./hudStore";
 import { useIsMobile } from "./useIsMobile";
 import { warmupFor } from "../sim/types";
@@ -267,6 +270,9 @@ export function Hud({
         </div>
       )}
 
+      {/* Screen centre, so looking around has something to aim with. */}
+      {hud.layers.walkCamera && <div className="walk-reticle" />}
+
       {!sandbox && !mobile && (
         <div className="panel panel-objective">{objective}</div>
       )}
@@ -307,6 +313,28 @@ export function Hud({
                 <span>{layer.label}</span>
               </label>
             ))}
+
+            {hud.layers.depthOfField && (
+              <label
+                className="layers-row layers-slider"
+                title="How gently the blur falls off close in — walking, and zoomed all the way in on the map"
+              >
+                <span>Focus distance</span>
+                <input
+                  type="range"
+                  min={WALK_FOCUS_DISTANCE_MIN}
+                  max={WALK_FOCUS_DISTANCE_MAX}
+                  step={1}
+                  value={hud.walkFocusDistance}
+                  onChange={(e) =>
+                    setWalkFocusDistance(Number(e.target.value))
+                  }
+                />
+                <span className="layers-slider-value">
+                  {hud.walkFocusDistance}m
+                </span>
+              </label>
+            )}
           </div>
         )}
       </div>

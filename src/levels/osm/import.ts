@@ -888,20 +888,22 @@ function buildShopfronts(
     }
     if (index === -1 || taken.has(index)) continue;
 
-    const front = streetWall(rings[index].poly, corridors);
-    if (!front) continue;
+    const walls = streetWalls(rings[index].poly, corridors);
+    if (walls.length === 0) continue;
 
     taken.add(index);
-    out.push({
-      pos: [front.x, front.z],
-      angle: front.angle,
-      width: front.width,
-      // Never above the eaves: a two-metre garage cannot carry a sign at 3.6m.
-      y: Math.min(FASCIA_Y, Math.max(1.6, rings[index].height - 0.6)),
-      name: tags.name,
-      brand: brandKey(tags.brand ?? tags.name),
-      category,
-    });
+    for (const wall of walls) {
+      out.push({
+        pos: [wall.x, wall.z],
+        angle: wall.angle,
+        width: wall.width,
+        // Never above the eaves: a two-metre garage cannot carry a sign at 3.6m.
+        y: Math.min(FASCIA_Y, Math.max(1.6, rings[index].height - 0.6)),
+        name: tags.name,
+        brand: brandKey(tags.brand ?? tags.name),
+        category,
+      });
+    }
   }
 
   return out;
@@ -943,24 +945,34 @@ function pointOf(
   return n === 0 ? null : { x: x / n, z: z / n };
 }
 
+/** Two angles' separation, folded into (-π, π]. */
+function angleDiff(a: number, b: number): number {
+  let d = (a - b) % (2 * Math.PI);
+  if (d > Math.PI) d -= 2 * Math.PI;
+  if (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
 /**
- * The wall to hang the sign on: of the outline's edges long enough to letter,
- * the one that most faces a street.
+ * The walls to hang awnings on: of the outline's edges long enough to letter,
+ * the ones that face a street — one, ordinarily, but two for a corner
+ * building with frontage on both of them.
  *
  * "Faces" rather than "is nearest": the measurement is taken a metre out in
  * front of the wall, so a back wall a few metres from the avenue behind the
  * block scores worse than the frontage it actually belongs to. The length floor
- * is what keeps the sign off the two-metre chamfer that corner buildings have
+ * is what keeps an awning off the two-metre chamfer that corner buildings have
  * across the corner — geometrically the closest edge to the junction, and the
  * one place on the building a name will not fit.
+ *
+ * Capped at two, and never two edges facing near enough the same way: a bay
+ * window or a shallow notch splits one frontage across two edges, and that is
+ * one street side, not a second one to hang a duplicate awning on.
  */
-function streetWall(
+function streetWalls(
   poly: P[],
   corridors: Corridor[],
-): { x: number; z: number; angle: number; width: number } | null {
-  let best: { x: number; z: number; angle: number; width: number } | null = null;
-  let bestReach = STREET_REACH;
-
+): { x: number; z: number; angle: number; width: number }[] {
   // Which side of a wall is outdoors, settled against the outline's own middle
   // rather than against its winding. The winding is documented as
   // counter-clockwise, but a sign that faces indoors on half the buildings is
@@ -968,6 +980,14 @@ function streetWall(
   // inside it for every shape a building is.
   const cx = poly.reduce((s, p) => s + p.x, 0) / poly.length;
   const cz = poly.reduce((s, p) => s + p.z, 0) / poly.length;
+
+  const candidates: {
+    x: number;
+    z: number;
+    angle: number;
+    width: number;
+    reach: number;
+  }[] = [];
 
   for (let i = 0; i < poly.length; i++) {
     const a = poly[i];
@@ -978,11 +998,11 @@ function streetWall(
     const mid = { x: (a.x + b.x) / 2, z: (a.z + b.z) / 2 };
 
     /*
-     * The sign board is a box lying along its own local X, turned about Y to
+     * The awning is a box lying along its own local X, turned about Y to
      * meet the wall. A Y rotation of `angle` sends local +X to
      * (cos angle, -sin angle) and its face, local +Z, to (sin angle, cos angle)
-     * — so laying the board along a -> b is `atan2(-dz, dx)`, and the face then
-     * comes out perpendicular to the wall for free. Half the time it comes out
+     * — so laying it along a -> b is `atan2(-dz, dx)`, and the face then comes
+     * out perpendicular to the wall for free. Half the time it comes out
      * pointing indoors, which the centroid settles.
      */
     let angle = Math.atan2(-(b.z - a.z), b.x - a.x);
@@ -999,13 +1019,21 @@ function streetWall(
     for (const c of corridors) {
       reach = Math.min(reach, distToSegment(probe, c.a, c.b) - c.half);
     }
-    if (reach >= bestReach) continue;
+    if (reach >= STREET_REACH) continue;
 
-    bestReach = reach;
-    best = { x: mid.x, z: mid.z, angle, width: Math.min(width, MAX_FASCIA) };
+    candidates.push({ x: mid.x, z: mid.z, angle, width: Math.min(width, MAX_FASCIA), reach });
   }
 
-  return best;
+  candidates.sort((a, b) => a.reach - b.reach);
+
+  const picked: typeof candidates = [];
+  for (const c of candidates) {
+    if (picked.length >= 2) break;
+    if (picked.some((p) => Math.abs(angleDiff(p.angle, c.angle)) < Math.PI / 4)) continue;
+    picked.push(c);
+  }
+
+  return picked;
 }
 
 export type ImportOptions = {
