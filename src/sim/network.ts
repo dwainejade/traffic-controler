@@ -149,6 +149,38 @@ function polyline(points: Vec2[]): Pick<Lane, "pts" | "cum" | "length"> {
   return { pts, cum, length: total };
 }
 
+/** Shortest-path interpolation from angle `a` to `b`, at fraction `t`. */
+function angleLerp(a: number, b: number, t: number): number {
+  const twoPi = Math.PI * 2;
+  const diff = (((b - a + Math.PI) % twoPi) + twoPi) % twoPi - Math.PI;
+  return a + diff * t;
+}
+
+/**
+ * Heading at polyline vertex `j`, blended from its neighbouring segments
+ * (a centred difference) rather than taken from just one of them. An interior
+ * vertex is the corner between two segments with different constant
+ * headings; using the neighbour on both sides gives each vertex a single
+ * heading that the segments on either side can be interpolated toward,
+ * instead of each vertex belonging to whichever segment is sampled.
+ */
+function vertexHeading(pts: Float32Array, n: number, j: number): number {
+  if (j <= 0) {
+    return Math.atan2(pts[2] - pts[0], pts[3] - pts[1]);
+  }
+  if (j >= n - 1) {
+    const last = n - 1;
+    return Math.atan2(
+      pts[last * 2] - pts[(last - 1) * 2],
+      pts[last * 2 + 1] - pts[(last - 1) * 2 + 1],
+    );
+  }
+  return Math.atan2(
+    pts[(j + 1) * 2] - pts[(j - 1) * 2],
+    pts[(j + 1) * 2 + 1] - pts[(j - 1) * 2 + 1],
+  );
+}
+
 /** Position and heading at distance s along a lane. */
 export function sampleLane(
   lane: Lane,
@@ -171,7 +203,21 @@ export function sampleLane(
 
   out.x = ax + (bx - ax) * t;
   out.z = az + (bz - az) * t;
-  out.angle = Math.atan2(bx - ax, bz - az);
+
+  /*
+   * The polyline's true heading is constant per segment and steps at every
+   * vertex — accurate, but a car can spend many frames crossing one segment
+   * at low playback speed and then snap to the next, reading as a stutter
+   * rather than a turn. Interpolating between each segment's *blended*
+   * vertex headings keeps the heading turning continuously through the
+   * corner instead of stepping at it, without moving the path itself.
+   */
+  const n = cum.length;
+  out.angle = angleLerp(
+    vertexHeading(pts, n, i - 1),
+    vertexHeading(pts, n, i),
+    t,
+  );
 }
 
 /** Signed turn classification for traffic heading `from` and leaving along `to`. */
