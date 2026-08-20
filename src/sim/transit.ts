@@ -89,8 +89,20 @@ const DWELL_MAX = 45
  */
 const STOP_OFFSET_PAST_JUNCTION = 18
 
-/** Shortest gap between two stops on one route. A stop a block is not a stop. */
-const MIN_STOP_SPACING = 180
+/**
+ * Shortest gap between two stops on one route, metres.
+ *
+ * Matching `buildBusStops`, which put the ambient service's stops about a
+ * long block apart. Closer than this and the bus spends the whole route with
+ * its doors open; further and the walk to it eats the time the ride saved.
+ */
+const MIN_STOP_SPACING = 150
+
+/**
+ * Shortest block a stop will fit in: the offset past the junction, the bus
+ * itself, and enough left over that it is not still in the next junction box.
+ */
+const MIN_STOP_BLOCK = STOP_OFFSET_PAST_JUNCTION + VEHICLE.bus.length + 8
 
 /**
  * Transit stop ids live above this so they can share `Car.servedStop` with the
@@ -147,8 +159,18 @@ export type TransitRoute = {
   /** Where the drawn path ends and the return leg begins, as an index into `lanes`. */
   returnAt: number
   stops: TransitStop[]
-  /** Buses assigned to this route. */
+  /**
+   * Buses the player has asked for on this route.
+   *
+   * The target, not the count on the road. They differ for two reasons and both
+   * matter: a bus can be towed after a collision, and a spawn can be refused
+   * because the terminus is occupied. Keeping only the achieved count would let
+   * a line silently shrink — one tow and it runs a bus short for the rest of
+   * the game, with nothing but a slowly emptying stop to say so.
+   */
   buses: number
+  /** How many are actually out there right now. */
+  running: number
   /** Metres round the loop. */
   length: number
 }
@@ -252,6 +274,11 @@ export type TransitHost = {
 }
 
 // -------------------------------------------------------------------- helpers
+
+/** Composite key for the lane-and-route stop index. */
+function key(laneId: LaneId, routeId: RouteId): string {
+  return `${laneId}:${routeId}`
+}
 
 function dist(ax: number, az: number, bx: number, bz: number): number {
   return Math.hypot(ax - bx, az - bz)
@@ -361,32 +388,50 @@ export function buildRouteStops(
   let nextId = startId
   const placed: { x: number; z: number }[] = []
 
-  for (let i = 0; i < route.lanes.length; i++) {
-    const lane = net.lanes[route.lanes[i]]
-    if (lane.kind !== 'road' || lane.fromNode === null) continue
+  /**
+   * @param spacing Relaxed on the second pass — see below.
+   */
+  const sweep = (spacing: number) => {
+    for (let i = 0; i < route.lanes.length; i++) {
+      const lane = net.lanes[route.lanes[i]]
+      if (lane.kind !== 'road' || lane.fromNode === null) continue
+      if (stops.some((s) => s.laneId === lane.id)) continue
+      // No room to pull in and still clear the far end of the block.
+      if (lane.length < MIN_STOP_BLOCK) continue
 
-    const at = STOP_OFFSET_PAST_JUNCTION
-    // No room to pull in and still clear the far end of the block.
-    if (lane.length < at + VEHICLE.bus.length + 12) continue
+      const at = STOP_OFFSET_PAST_JUNCTION
+      const p = samplePoly(laneToPoly(lane), at)
+      if (placed.some((q) => dist(q.x, q.z, p.x, p.z) < spacing)) continue
 
-    const p = samplePoly(laneToPoly(lane), at)
-    if (placed.some((q) => dist(q.x, q.z, p.x, p.z) < MIN_STOP_SPACING)) continue
-
-    stops.push({
-      id: nextId++,
-      routeId: route.id,
-      laneId: lane.id,
-      laneS: at,
-      legIndex: i,
-      x: p.x,
-      z: p.z,
-      angle: Math.atan2(p.tx, p.tz),
-      node: lane.fromNode,
-      waiting: [],
-      enabled: true,
-    })
-    placed.push({ x: p.x, z: p.z })
+      stops.push({
+        id: nextId++,
+        routeId: route.id,
+        laneId: lane.id,
+        laneS: at,
+        legIndex: i,
+        x: p.x,
+        z: p.z,
+        angle: Math.atan2(p.tx, p.tz),
+        node: lane.fromNode,
+        waiting: [],
+        enabled: true,
+      })
+      placed.push({ x: p.x, z: p.z })
+    }
   }
+
+  sweep(MIN_STOP_SPACING)
+
+  /*
+   * A line with one stop is not a line — nobody can board it and alight
+   * somewhere else, so it carries nobody however many buses are put on it, and
+   * nothing on screen explains why. That happens on a short loop of short
+   * blocks, where the spacing floor rejects every candidate after the first. So
+   * the floor is relaxed rather than enforced: a stop pair too close together
+   * is a poor line the player can see and redraw; a line with one stop is a
+   * line that silently does not work.
+   */
+  if (stops.length < 2) sweep(MIN_STOP_BLOCK)
 
   return stops
 }
@@ -410,7 +455,17 @@ export class Transit {
   riders: Rider[] = []
   private freeRiders: RiderId[] = []
 
-  /** Every enabled stop, by the lane a bus meets it on. */
+  /**
+   * Every enabled stop, keyed by lane *and* route.
+   *
+   * Not by lane alone. Two lines that run a block of the same street have their
+   * stops at the same point on the same lane, and a bus that treated the whole
+   * lane's list as its own would open its doors at the other line's stop,
+   * record that as the one it served, then find its own stop again — dwelling
+   * for ever, one five-second interval at a time, without moving a metre.
+   */
+  private stopsByLaneRoute = new Map<string, TransitStop>()
+  /** Every enabled stop by lane, for the renderer and for lane-wide questions. */
   private stopsByLane = new Map<LaneId, TransitStop[]>()
   private stopById = new Map<StopId, TransitStop>()
 
@@ -515,6 +570,7 @@ export class Transit {
       returnAt: built.returnAt,
       stops: [],
       buses: 0,
+      running: 0,
       length: chainLength(this.host.net, built.lanes),
     }
     this.nextRouteNumber++
@@ -570,8 +626,15 @@ export class Transit {
     const route = this.routes.find((r) => r.id === id)
     if (!route) return
 
-    const wanted = Math.max(0, Math.min(20, Math.round(count)))
-    const running = this.busesByRoute.get(id) ?? []
+    route.buses = Math.max(0, Math.min(20, Math.round(count)))
+    this.fillFleet(route)
+    this.version++
+  }
+
+  /** Bring a route's fleet up to (or down to) the number the player asked for. */
+  private fillFleet(route: TransitRoute): void {
+    const wanted = route.buses
+    const running = this.busesByRoute.get(route.id) ?? []
 
     while (running.length > wanted) {
       const carId = running.pop()!
@@ -592,15 +655,17 @@ export class Transit {
       const target = route.length * share
       const spawn = this.spawnPointAt(route, target)
       if (!spawn) break
-      const carId = this.host.spawnBus(spawn.lanes, spawn.at, id, route.colour)
+      const carId = this.host.spawnBus(spawn.lanes, spawn.at, route.id, route.colour)
+      // Refused because something is standing on the spawn point. Give up for
+      // now rather than looping — the fleet sweep will try again in ten seconds,
+      // by which time the street will have moved.
       if (carId === null) break
       running.push(carId)
       this.load.set(carId, [])
     }
 
-    this.busesByRoute.set(id, running)
-    route.buses = running.length
-    this.version++
+    this.busesByRoute.set(route.id, running)
+    route.running = running.length
   }
 
   /**
@@ -649,11 +714,13 @@ export class Transit {
 
   private reindexStops(): void {
     this.stopsByLane.clear()
+    this.stopsByLaneRoute.clear()
     this.stopById.clear()
     for (const route of this.routes) {
       for (const stop of route.stops) {
         this.stopById.set(stop.id, stop)
         if (!stop.enabled) continue
+        this.stopsByLaneRoute.set(key(stop.laneId, stop.routeId), stop)
         const list = this.stopsByLane.get(stop.laneId) ?? []
         list.push(stop)
         this.stopsByLane.set(stop.laneId, list)
@@ -661,7 +728,23 @@ export class Transit {
     }
   }
 
-  /** Stops a bus on this lane should be watching for. */
+  /**
+   * The stop on this lane that this bus should be watching for: its own line's,
+   * and only if it has not already served it on this lap.
+   *
+   * The route is part of the question, not a filter applied to the answer. A
+   * bus asking "is there a stop here" and getting somebody else's gets stuck at
+   * it, because the id it records as served is not the id it will find next
+   * time it looks.
+   */
+  stopFor(routeId: string | null, laneId: LaneId, servedStop: number): TransitStop | null {
+    if (routeId === null) return null
+    const stop = this.stopsByLaneRoute.get(key(laneId, routeId))
+    if (!stop || stop.id === servedStop) return null
+    return stop
+  }
+
+  /** Every enabled stop on a lane, whoever's line it belongs to. */
   stopsOnLane(laneId: LaneId): TransitStop[] | undefined {
     return this.stopsByLane.get(laneId)
   }
@@ -676,8 +759,45 @@ export class Transit {
 
   // ----------------------------------------------------------------- riders
 
+  /**
+   * Put back any bus that has left the map.
+   *
+   * A bus can be towed after a collision like any other vehicle, and when one
+   * is, the line quietly runs one bus short for the rest of the game with
+   * nothing saying so — the stop it was due at simply stops being served. The
+   * player never touched the fleet, so the fleet is what has to be restored.
+   *
+   * Not every tick: the check walks every bus, and a service losing a vehicle is
+   * a once-an-hour event, not a once-a-frame one.
+   */
+  private replaceLostBuses(): void {
+    for (const route of this.routes) {
+      const running = this.busesByRoute.get(route.id)
+      if (!running) continue
+
+      for (let i = running.length - 1; i >= 0; i--) {
+        if (this.host.carActive(running[i])) continue
+        for (const riderId of this.load.get(running[i]) ?? []) this.strand(this.riders[riderId])
+        this.load.delete(running[i])
+        running.splice(i, 1)
+      }
+
+      if (running.length === route.buses) continue
+      this.fillFleet(route)
+      this.version++
+    }
+  }
+
+  private sinceSweep = 0
+
   /** Fixed-timestep tick, called from the world's own. */
   tick(dt: number): void {
+    this.sinceSweep += dt
+    if (this.sinceSweep >= 10) {
+      this.sinceSweep = 0
+      this.replaceLostBuses()
+    }
+
     this.spawnRiders(dt)
 
     let waiting = 0

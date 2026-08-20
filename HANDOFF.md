@@ -1,3 +1,71 @@
+# Transit mode — state of play
+
+> A second game on the same city: the player draws bus routes and the traffic
+> and signals become the environment. Nothing in the driving model changed — a
+> bus is an ordinary vehicle, subject to the same IDM following, the same
+> conflict points, the same red lights.
+>
+> **New modules:** `src/sim/transitGraph.ts` (point-to-point Dijkstra over the
+> lane graph — `routing.ts` only reaches map-edge destinations, and a drawn
+> route is between arbitrary junctions), `src/sim/transit.ts` (routes, stops,
+> riders, boarding, score), `src/render/TransitLayer.tsx`,
+> `src/render/useTransitLayer.ts`, `src/render/destinations.ts`,
+> `src/render/ribbon.ts`, `src/ui/TransitPanel.tsx`, `src/ui/transitStore.ts`,
+> `src/art/transit.ts`.
+>
+> **Measured, on Bay Ridge, headless via `world.step`:** with three drawn lines
+> and six buses, 2 hours of service delivered 2612 of 3120 trips on empty
+> streets (mean journey 608s, mean wait 195s), and 954 of 2340 with the ambient
+> traffic running. The rider ledger balances in both.
+>
+> Three things are load-bearing and each was a bug first:
+>
+> - **A lane can carry stops from several lines.** A bus that asked "is there a
+>   stop on this lane" got somebody else's, recorded that id as served, then
+>   found its own again — and dwelled for ever, five seconds at a time, without
+>   moving a metre. `stopFor(routeId, laneId, servedStop)` asks with the route
+>   as part of the question. Symptom was every bus full, nothing delivered.
+> - **A loop must close onto its first *lane*, not its first junction.**
+>   Arriving at the junction the route starts from is not the same as arriving
+>   on a lane with a legal movement into it, and `advanceLanes` wraps a looping
+>   car straight from the end of its chain to the start. `pathToLane` is what
+>   the return leg uses.
+> - **Region clipping must exempt bus routes.** The sim is clipped to the
+>   camera, which is right for anonymous traffic and wrong for the player's
+>   service: it would halt whenever they panned away. Lanes *and* junctions on a
+>   route stay active — junctions because `stepJunction` is what advances the
+>   signal, so a clipped-out junction has a frozen light.
+>
+> **Two art-direction facts, both found on screen and neither obvious:**
+>
+> - **A drawn line has to be sized in pixels, not metres.** At the framing a
+>   5km import opens on — which is the framing a route is planned at — a line
+>   at a believable five metres is a thread nobody can follow. The ribbon
+>   carries its normals as an attribute and takes its width from a uniform the
+>   frame loop sets from the camera, clamped at both ends. Stops, pedestrians
+>   and destination pins are scaled the same way and for the same reason.
+> - **The ribbon must be `DoubleSide`.** It is built by walking a centreline and
+>   emitting a vertex either side, so its winding depends on which way the
+>   street runs: single-sided, a line drawn north-to-south renders and the same
+>   line drawn south-to-north is invisible. This cost an afternoon, because
+>   every other symptom — uniforms, colours, layer heights, the bounding sphere
+>   — checked out.
+>
+> **Crash rate is the base sim's, not the buses'.** A/B on the whole unclipped
+> map for an hour: 301 collisions with no transit, 322 with three lines and six
+> buses. Bay Ridge itself fails phase validation at `j452196762`, which is where
+> most of them come from and is a pre-existing level bug.
+>
+> **Not modelled, deliberately:** transfers (one bus or no bus), a walking
+> network (straight lines at 1.3 m/s within 400m), and any economy — buses are
+> placed, not bought. Each is a layer that sits cleanly on top of what is here.
+>
+> **`planTrip` is O(routes x stops^2) per rider** and runs on spawn. Fine at the
+> sizes measured; the first thing to index if a big map with a dozen lines gets
+> slow.
+
+---
+
 # Traffic controller — state of play
 
 > **This section reflects the work as built. The task brief below it is kept for

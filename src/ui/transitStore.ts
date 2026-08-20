@@ -20,7 +20,10 @@ export type RouteMirror = {
   id: RouteId
   name: string
   colour: number
+  /** Buses the player asked for. */
   buses: number
+  /** Buses actually on the road, which lags after a tow or a blocked terminus. */
+  running: number
   stops: number
   /** Kilometres round the loop. */
   km: number
@@ -117,6 +120,7 @@ export function publishTransit(layer: Transit): void {
       name: r.name,
       colour: r.colour,
       buses: r.buses,
+      running: r.running,
       stops: r.stops.filter((s) => s.enabled).length,
       km: r.length / 1000,
       waiting,

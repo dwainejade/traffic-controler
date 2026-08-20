@@ -141,6 +141,16 @@ export function TransitPanel() {
                 </button>
                 <span className="transit-bus-count">
                   {route.buses} bus{route.buses === 1 ? '' : 'es'}
+                  {route.running < route.buses && (
+                    // A bus can be towed, or refused a spawn because the
+                    // terminus is occupied. Both are temporary and both are
+                    // worth saying, because the line is running short until
+                    // they clear.
+                    <em title="One is off the road — it will be back">
+                      {' '}
+                      ({route.running} out)
+                    </em>
+                  )}
                 </span>
                 <button
                   onClick={(e) => {

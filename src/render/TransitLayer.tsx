@@ -14,13 +14,13 @@ import {
   riderColor,
 } from '../art/transit'
 import { junctionSize, type LevelDef, type NodeId } from '../sim/types'
-import { buildRouteLanes, sampleHomes, Transit, WALK_RADIUS } from '../sim/transit'
+import { viewRadius } from './viewCentre'
+import { buildRouteLanes, WALK_RADIUS, type TransitStop } from '../sim/transit'
 import type { World } from '../sim/world'
 import { LAYER } from './layers'
-import { chainPolyline, ribbonGeometry } from './ribbon'
+import { chainPolyline, halfWidthFor, ribbonGeometry, ribbonMaterial } from './ribbon'
 import type { DestinationSite } from './destinations'
 import {
-  bindTransit,
   extendDraft,
   publishTransit,
   setHover,
@@ -37,16 +37,42 @@ import {
  * them is the only thing keeping them apart.
  */
 
-/** Width of a drawn line, metres. Two thirds of a lane — a diagram, not paint. */
-const LINE_WIDTH = 2.4
-const CASING_WIDTH = 3.6
+/**
+ * Width of a drawn line, in *pixels*, and the world-metre range it is allowed
+ * to occupy while holding that.
+ *
+ * Pixels because a line is a diagram: following one across a borough and
+ * following one down a block are the same task and want the same stroke. The
+ * clamps stop it degenerating at either extreme — thinner than the floor and it
+ * disappears among the roads, wider than the ceiling and it swallows the street
+ * it is drawn on when the camera comes down to it.
+ */
+const LINE_PIXELS = 5
+const CASING_PIXELS = 9
+const LINE_MIN_M = 1.6
+const LINE_MAX_M = 6
+const CASING_MIN_M = 3
+const CASING_MAX_M = 10
+
+/** A stop marker, likewise in pixels. Wider than the line, as on a transit map. */
+const STOP_PIXELS = 13
+const STOP_MIN_M = 5
+const STOP_MAX_M = 14
+
+/** The pin over a destination building. */
+const MARKER_PIXELS = 4
+const MARKER_MIN_M = 1.1
+const MARKER_MAX_M = 5
 
 /** How close the pointer must come to a junction for the draw tool to snap. */
 const SNAP_RADIUS = 55
 
-/** A waiting pedestrian, in metres. Legible at map zoom, absurd at street level. */
+/** A waiting pedestrian, at true size — scaled to the camera when drawn. */
 const RIDER_RADIUS = 1.1
 const RIDER_HEIGHT = 3.4
+const RIDER_PIXELS = 5
+const RIDER_MIN_M = 1.1
+const RIDER_MAX_M = 7
 
 // ------------------------------------------------------------------ shared
 
@@ -79,9 +105,10 @@ function TransitLines({ world }: { world: World }) {
       const points = chainPolyline(world.net, route.lanes)
       return {
         id: route.id,
-        colour: LINE_COLORS[route.colour % LINE_COLORS.length],
-        line: ribbonGeometry(points, LINE_WIDTH, LAYER.line),
-        casing: ribbonGeometry(points, CASING_WIDTH, LAYER.lineCasing),
+        line: ribbonGeometry(points, LAYER.line),
+        casing: ribbonGeometry(points, LAYER.lineCasing),
+        lineMat: ribbonMaterial(LINE_COLORS[route.colour % LINE_COLORS.length], 1),
+        casingMat: ribbonMaterial(LINE_CASING, 0.9),
         stops: route.stops.filter((s) => s.enabled),
       }
     })
@@ -95,9 +122,36 @@ function TransitLines({ world }: { world: World }) {
       for (const m of meshes) {
         m.line.dispose()
         m.casing.dispose()
+        m.lineMat.dispose()
+        m.casingMat.dispose()
       }
     }
   }, [meshes])
+
+  /*
+   * Width and dimming are driven from the frame loop rather than from React.
+   * Both change with the camera, which moves every frame of a gesture, and a
+   * re-render per frame of a pan would cost more than everything else this
+   * component does put together.
+   */
+  useFrame((state) => {
+    const radius = viewRadius(state.camera, state.size.width, state.size.height)
+    const half = halfWidthFor(radius, state.size.height, LINE_PIXELS, LINE_MIN_M, LINE_MAX_M)
+    const casing = halfWidthFor(
+      radius,
+      state.size.height,
+      CASING_PIXELS,
+      CASING_MIN_M,
+      CASING_MAX_M,
+    )
+    for (const m of meshes) {
+      const dim = selected !== null && selected !== m.id
+      m.lineMat.uniforms.uHalf.value = half
+      m.casingMat.uniforms.uHalf.value = casing
+      m.lineMat.uniforms.uOpacity.value = dim ? 0.4 : 1
+      m.casingMat.uniforms.uOpacity.value = dim ? 0.35 : 0.9
+    }
+  })
 
   return (
     <group>
@@ -105,40 +159,65 @@ function TransitLines({ world }: { world: World }) {
         const dim = selected !== null && selected !== m.id
         return (
           <group key={m.id}>
-            <mesh geometry={m.casing}>
-              {/*
-                Unlit. A line is a diagram drawn over the city, and shading it
-                would make it dip into shadow under the buildings it passes —
-                which is exactly where the player most needs to follow it.
-              */}
-              <meshBasicMaterial
-                color={LINE_CASING}
-                transparent
-                opacity={dim ? 0.35 : 0.9}
-                depthWrite={false}
-              />
-            </mesh>
-            <mesh geometry={m.line}>
-              <meshBasicMaterial
-                color={m.colour}
-                transparent
-                opacity={dim ? 0.4 : 1}
-                depthWrite={false}
-              />
-            </mesh>
-            {m.stops.map((stop) => (
-              <group key={stop.id} position={[stop.x, 0, stop.z]}>
-                <mesh geometry={STOP_RIM_GEOM} position={[0, LAYER.stopMarker, 0]}>
-                  <meshBasicMaterial color={STOP_RIM} transparent opacity={dim ? 0.3 : 0.85} />
-                </mesh>
-                <mesh geometry={STOP_GEOM} position={[0, LAYER.stopMarker + 0.01, 0]}>
-                  <meshBasicMaterial color={STOP_FACE} transparent opacity={dim ? 0.35 : 1} />
-                </mesh>
-              </group>
-            ))}
+            <mesh geometry={m.casing} material={m.casingMat} />
+            <mesh geometry={m.line} material={m.lineMat} />
+            <StopMarkers stops={m.stops} dim={dim} />
           </group>
         )
       })}
+    </group>
+  )
+}
+
+/**
+ * The stops on one line, as two instanced discs.
+ *
+ * Sized in pixels like the line they punctuate, and for the same reason: a stop
+ * drawn at its real four metres is a speck at the zoom a route is planned at,
+ * which is exactly the zoom at which "does this line reach that building" is
+ * the question being asked.
+ */
+function StopMarkers({ stops, dim }: { stops: TransitStop[]; dim: boolean }) {
+  const rim = useRef<THREE.InstancedMesh>(null)
+  const face = useRef<THREE.InstancedMesh>(null)
+  const scratch = useMemo(
+    () => ({ m: new THREE.Matrix4(), q: new THREE.Quaternion(), p: new THREE.Vector3(), s: new THREE.Vector3() }),
+    [],
+  )
+
+  useFrame((state) => {
+    if (!rim.current || !face.current) return
+    const radius = viewRadius(state.camera, state.size.width, state.size.height)
+    // Against the marker geometry's own 2.6m face radius, so the number below
+    // reads as "a stop is this many pixels across".
+    const scale =
+      halfWidthFor(radius, state.size.height, STOP_PIXELS, STOP_MIN_M, STOP_MAX_M) / 2.6
+
+    stops.forEach((stop, i) => {
+      scratch.p.set(stop.x, LAYER.stopMarker, stop.z)
+      scratch.s.set(scale, 1, scale)
+      scratch.m.compose(scratch.p, scratch.q, scratch.s)
+      rim.current!.setMatrixAt(i, scratch.m)
+      scratch.p.y = LAYER.stopMarker + 0.01
+      scratch.m.compose(scratch.p, scratch.q, scratch.s)
+      face.current!.setMatrixAt(i, scratch.m)
+    })
+    rim.current.count = stops.length
+    face.current.count = stops.length
+    rim.current.instanceMatrix.needsUpdate = true
+    face.current.instanceMatrix.needsUpdate = true
+  })
+
+  if (stops.length === 0) return null
+
+  return (
+    <group>
+      <instancedMesh ref={rim} args={[STOP_RIM_GEOM, undefined, stops.length]} frustumCulled={false}>
+        <meshBasicMaterial color={STOP_RIM} transparent opacity={dim ? 0.3 : 0.85} depthWrite={false} />
+      </instancedMesh>
+      <instancedMesh ref={face} args={[STOP_GEOM, undefined, stops.length]} frustumCulled={false}>
+        <meshBasicMaterial color={STOP_FACE} transparent opacity={dim ? 0.35 : 1} depthWrite={false} />
+      </instancedMesh>
     </group>
   )
 }
@@ -176,12 +255,25 @@ function Riders() {
     [],
   )
 
-  useFrame(() => {
+  useFrame((state) => {
     const mesh = ref.current
     const layer = transit()
     if (!mesh || !layer) return
 
     layer.syncRiding()
+
+    /*
+     * A person is 1.1m across, which at the zoom a whole borough fits in is a
+     * fifth of a pixel. Pips are scaled to the camera like the lines and the
+     * stops are, and for the same reason: the crowd on a corner with no line
+     * near it is the game's only picture of unserved demand, and it has to be
+     * visible at the zoom the player plans routes at. Clamped hard at the top
+     * so walking down the street does not put giants on the pavement.
+     */
+    const radius = viewRadius(state.camera, state.size.width, state.size.height)
+    const grow =
+      halfWidthFor(radius, state.size.height, RIDER_PIXELS, RIDER_MIN_M, RIDER_MAX_M) /
+      RIDER_RADIUS
 
     let n = 0
     for (const rider of layer.riders) {
@@ -197,7 +289,7 @@ function Riders() {
        * the missed count goes up with nothing on screen having explained it.
        */
       const fading = rider.phase === 'waiting' ? Math.min(1, rider.waited / 600) : 0
-      scratch.scale.set(1, 1 - fading * 0.45, 1)
+      scratch.scale.set(grow, grow * (1 - fading * 0.45), grow)
       scratch.m.compose(scratch.pos, scratch.q, scratch.scale)
       mesh.setMatrixAt(n, scratch.m)
 
@@ -236,8 +328,24 @@ function Riders() {
  * place is findable from anywhere on the map.
  */
 function Destinations({ sites }: { sites: DestinationSite[] }) {
+  const group = useRef<THREE.Group>(null)
+
+  /*
+   * The markers thicken with distance, like everything else in this layer. Not
+   * their height, though — a marker that grew taller as the camera pulled back
+   * would leave the roof it is standing on. Only the width, so a pin stays a
+   * pin and stays findable.
+   */
+  useFrame((state) => {
+    if (!group.current) return
+    const radius = viewRadius(state.camera, state.size.width, state.size.height)
+    const wide =
+      halfWidthFor(radius, state.size.height, MARKER_PIXELS, MARKER_MIN_M, MARKER_MAX_M) / 1.1
+    for (const child of group.current.children) child.scale.set(wide, 1, wide)
+  })
+
   return (
-    <group>
+    <group ref={group}>
       {sites.map((site, i) => {
         const colour = DESTINATION_COLORS[i % DESTINATION_COLORS.length]
         const top = site.height + 26
@@ -375,20 +483,39 @@ function RouteDraft({ level, world }: { level: LevelDef; world: World }) {
     const built = buildRouteLanes(world.net, draft)
     if (!built) return null
     const points = chainPolyline(world.net, built.lanes.slice(0, built.returnAt))
-    return ribbonGeometry(points, LINE_WIDTH, LAYER.draft)
+    return {
+      geom: ribbonGeometry(points, LAYER.draft),
+      mat: ribbonMaterial(DRAFT_LINE, 0.9),
+    }
   }, [draft, world])
 
-  useEffect(() => () => preview?.dispose(), [preview])
+  useEffect(
+    () => () => {
+      preview?.geom.dispose()
+      preview?.mat.dispose()
+    },
+    [preview],
+  )
+
+  // The draft is drawn a shade heavier than a committed line, so a path laid
+  // over one the player already has is the one they can see themselves moving.
+  useFrame((state) => {
+    if (!preview) return
+    const radius = viewRadius(state.camera, state.size.width, state.size.height)
+    preview.mat.uniforms.uHalf.value = halfWidthFor(
+      radius,
+      state.size.height,
+      LINE_PIXELS + 2,
+      LINE_MIN_M,
+      LINE_MAX_M + 2,
+    )
+  })
 
   if (!drawing) return null
 
   return (
     <group>
-      {preview && (
-        <mesh geometry={preview}>
-          <meshBasicMaterial color={DRAFT_LINE} transparent opacity={0.9} depthWrite={false} />
-        </mesh>
-      )}
+      {preview && <mesh geometry={preview.geom} material={preview.mat} />}
       {nodes.map((node) => {
         const isHover = hover === node.id
         const onPath = draft.includes(node.id)
@@ -419,6 +546,16 @@ function RouteDraft({ level, world }: { level: LevelDef; world: World }) {
 /** Push the layer's numbers into the store, a few times a second. */
 function TransitMirror() {
   const since = useRef(0)
+  const scene = useThree((s) => s.scene)
+  const camera = useThree((s) => s.camera)
+
+  // Console handle on the rendered scene, next to `simWorld` and `TRANSIT`.
+  // This layer is almost entirely geometry, and "it is not on screen" has at
+  // least four causes that look identical from the outside.
+  useEffect(() => {
+    if (import.meta.env?.DEV) Object.assign(globalThis, { TRANSIT_SCENE: { scene, camera } })
+  }, [scene, camera])
+
   useFrame((_, dt) => {
     const layer = transit()
     if (!layer) return
@@ -453,64 +590,4 @@ export function TransitLayer({
       <TransitMirror />
     </group>
   )
-}
-
-/**
- * Attach a transit layer to a world, and keep it attached for that world's life.
- *
- * One layer per world, cached, because the routes the player has drawn are the
- * only thing in this game they cannot get back — remounting the scene, toggling
- * a map layer or switching camera mode must not cost them their network.
- */
-const layers = new WeakMap<World, Transit>()
-
-export function useTransitLayer(
-  world: World,
-  level: LevelDef,
-  destinations: DestinationSite[],
-): void {
-  const enabled = useTransit((s) => s.enabled)
-
-  useEffect(() => {
-    if (!enabled) {
-      world.transit = null
-      world.ambientBuses = true
-      bindTransit(null)
-      return
-    }
-
-    let layer = layers.get(world)
-    if (!layer) {
-      layer = new Transit(world.transitHost(), level.seed)
-      layers.set(world, layer)
-    }
-
-    layer.setDestinations(destinations)
-    /*
-     * Homes are re-sampled whenever the destinations move, because the
-     * residential gradient is defined *against* them: the far corners of the
-     * map are where people live precisely because that is where the jobs are
-     * not. Sampling them once and keeping them would leave the gradient
-     * pointing at wherever the first level's downtown happened to be.
-     */
-    layer.setHomes(
-      sampleHomes(world.net, level.nodes, destinations, 260, level.seed),
-    )
-    // Demand scales with the city. A five-block import and a whole borough
-    // should both open at a service load proportional to how much of them
-    // there is to serve, not at one number tuned on whichever was tested.
-    layer.demand = Math.max(0.3, Math.min(6, level.nodes.length / 90))
-
-    world.transit = layer
-    // The scripted bus service is switched off: an unowned bus running the OSM
-    // bus lanes beside the player's own line is indistinguishable from a bug in
-    // their line.
-    world.ambientBuses = false
-    bindTransit(layer)
-
-    return () => {
-      world.transit = null
-      world.ambientBuses = true
-    }
-  }, [enabled, world, level, destinations])
 }

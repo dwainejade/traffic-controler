@@ -225,7 +225,7 @@ const STOP_APPROACH = 30;
 type StopLike = { id: number; laneS: number; dwell?: number };
 
 /** Shared empty result, so the per-step stop lookup never allocates. */
-const EMPTY_STOPS: StopLike[] = [];
+const EMPTY_STOPS: BusStop[] = [];
 
 export type Car = {
   id: number;
@@ -1442,12 +1442,22 @@ export class World {
    * does, and rebuilding the former to append to the latter would throw away
    * the parking layout that was fitted around it.
    */
-  private stopsFor(laneId: LaneId): StopLike[] {
-    const fixed = this.stopsByLane.get(laneId);
-    const drawn = this.transit?.stopsOnLane(laneId);
-    if (!drawn || drawn.length === 0) return fixed ?? EMPTY_STOPS;
-    if (!fixed) return drawn;
-    return [...fixed, ...drawn];
+  private stopAt(car: Car): StopLike | null {
+    /*
+     * A player's line first, because in transit mode the ambient service is off
+     * and there is nothing else to find. Asked with the bus's own route, not
+     * with its lane alone: two lines running a block of the same street have
+     * their stops at the same point on it, and a bus that served whichever came
+     * back first would record an id it will not recognise next time it looks —
+     * so it would dwell there for ever, five seconds at a time.
+     */
+    const drawn = this.transit?.stopFor(car.routeId, car.lane, car.servedStop);
+    if (drawn) return drawn;
+
+    for (const stop of this.stopsByLane.get(car.lane) ?? EMPTY_STOPS) {
+      if (stop.id !== car.servedStop) return stop;
+    }
+    return null;
   }
 
   /**
@@ -1883,9 +1893,8 @@ export class World {
 
         // Pulled up at a stop it has not served: open the doors.
         if (car.kind === "bus" && car.v < 0.6) {
-          for (const stop of this.stopsFor(car.lane)) {
-            if (stop.id === car.servedStop) continue;
-            if (Math.abs(stop.laneS - car.s) > 1.2) continue;
+          const stop = this.stopAt(car);
+          if (stop && Math.abs(stop.laneS - car.s) <= 1.2) {
             /*
              * A transit stop's dwell is not a property of the stop, it is how
              * long the people there take to get on — so the layer is asked at
@@ -1893,11 +1902,11 @@ export class World {
              * placed. A busy stop genuinely holds up the street behind it,
              * which is what gives stop placement a cost.
              */
-            car.dwellLeft = this.transit?.stop(stop.id)
-              ? this.transit.serviceStop(car.id, stop.id)
-              : (stop.dwell ?? 0);
+            car.dwellLeft =
+              stop.dwell !== undefined
+                ? stop.dwell
+                : (this.transit?.serviceStop(car.id, stop.id) ?? 0);
             car.servedStop = stop.id;
-            break;
           }
         }
 
@@ -2232,10 +2241,9 @@ export class World {
      * never arrives at it.
      */
     if (car.kind === "bus" && car.dwellLeft <= 0) {
-      for (const stop of this.stopsFor(car.lane)) {
-        if (stop.id === car.servedStop) continue;
-        const toStop = stop.laneS - car.s;
-        if (toStop < 0 || toStop > STOP_APPROACH) continue;
+      const stop = this.stopAt(car);
+      const toStop = stop ? stop.laneS - car.s : -1;
+      if (stop && toStop >= 0 && toStop <= STOP_APPROACH) {
         // This driver's standstill gap, not the fleet average: IDM comes to rest
         // with `s0` still in hand, so a stop line aimed past by anything else
         // leaves the bus short of its own stop and it never registers arrival.

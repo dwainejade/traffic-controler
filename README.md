@@ -1,5 +1,13 @@
 # Traffic Controller
 
+Two games on one city.
+
+**Signal control** — the original: you program the traffic lights and keep the
+city moving. **Transit mode** — you draw bus routes through that same city and
+carry people from where they live to where they are going, with the traffic and
+the signals running themselves as the weather you have to work in. The
+simulation underneath is the same one; a bus is an ordinary vehicle in it.
+
 A traffic-signal control game rendered in React Three Fiber. You look down on
 a city in an Apple-Maps-style 3/4 orthographic view and program the traffic
 lights — green splits, cycle length, offsets between junctions — to keep it
@@ -21,6 +29,24 @@ capacity, green-wave resonance).
 - Link junctions into a coordinated group sharing one cycle length
 - Auto green-wave: offsets each linked junction by its travel time from the first, so a platoon meets green all the way along
 - Per-junction subprograms that override a group's shared timing where needed
+
+### Transit mode
+
+- Draw a bus line street by street — click junctions and the path is laid along
+  the streets between them, always as a chain of movements the junctions
+  actually offer
+- Lines are closed loops: the drawn path plus a routed return leg, so a one-way
+  avenue comes back down the next one over and no bus ever needs a U-turn
+- Stops placed automatically on the far side of each junction, spaced a block
+  apart; buses added or removed per line, which is the frequency decision
+- Pedestrians spawn at home with a destination building in mind, walk up to
+  400m to a stop, board a line that reaches them, and are counted door to door
+- Riders are painted the colour of the building they are trying to reach, so a
+  crowd on a corner with no line near it is the map telling you where to draw
+- Signals run themselves — there is no light to program in this mode
+- Scored on delivered against missed, with mean journey and mean wait
+- Console harness: `TRANSIT` is the live layer in dev, `TRANSIT.ledgerBalances()`
+  asserts no rider has leaked out of the model
 
 ### Simulation
 
@@ -79,7 +105,10 @@ src/render/   Scene.tsx, RoadNetwork.tsx, junctionShape.ts, Ground.tsx,
 src/levels/   tJunction, crossroads, fiveWays, fourCorners, curveTest, osm/
 src/ui/       Hud.tsx, ProgramPanel.tsx, SplitBar.tsx, ImportForm.tsx,
               LevelSheet.tsx, hudStore.ts
-src/art/      palette.ts, daylight.ts
+src/sim/      transit.ts, transitGraph.ts       (transit mode)
+src/render/   TransitLayer.tsx, useTransitLayer.ts, destinations.ts, ribbon.ts
+src/ui/       TransitPanel.tsx, transitStore.ts
+src/art/      palette.ts, daylight.ts, transit.ts
 server/       db.ts (schema, lattice), worlds.ts (tiles -> level), index.ts (HTTP)
 tools/        fetchOsm.ts, ingest.ts, tsResolve.mjs
 ```
@@ -215,9 +244,11 @@ priority order:
 - [ ] Add more park features like baseball fields, basketball courts
 - [ ] Add more detailed buildings
 - [ ] Add FPS mode with walking and flying
-- [ ] Add trains
+- [ ] Add trains — the transit layer is written so a mode is a vehicle with a
+      route and a set of stops; a train is that on rails it lays itself
 - [ ] Stream in terrain live
-- [ ] remove traffic light controls
+- [x] remove traffic light controls — the phase editor is gone, and transit
+      mode is what replaced it as the thing the player does
 - [ ] improve car simulation
   - [ ] make some streets more busy
   - [ ] dynamic traffic patterns based on time of day
