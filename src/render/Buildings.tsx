@@ -9,7 +9,20 @@ import type { BuildingInst } from './scatter'
  * lives in the geometry's vertex colors; the per-building tint comes from
  * instanceColor. Three multiplies material * vertex * instance color.
  */
-export function Buildings({ items }: { items: BuildingInst[] }) {
+/**
+ * @param highlight Buildings that are somewhere people are going, by index into
+ * `items`, and the colour that says which. Transit mode's one licence to put a
+ * saturated colour on an environment surface — the map is unreadable without
+ * it, because a destination the player cannot see is a destination they cannot
+ * plan a route to.
+ */
+export function Buildings({
+  items,
+  highlight,
+}: {
+  items: BuildingInst[]
+  highlight?: Map<number, string>
+}) {
   const ref = useRef<THREE.InstancedMesh>(null)
   const geom = useMemo(() => buildingGeometry(), [])
 
@@ -30,14 +43,16 @@ export function Buildings({ items }: { items: BuildingInst[] }) {
         new THREE.Vector3(b.w, b.h, b.d),
       )
       mesh.setMatrixAt(i, m)
-      c.set(PALETTE.buildingTints[b.tint % PALETTE.buildingTints.length])
+      c.set(
+        highlight?.get(i) ?? PALETTE.buildingTints[b.tint % PALETTE.buildingTints.length],
+      )
       mesh.setColorAt(i, c)
     })
 
     mesh.instanceMatrix.needsUpdate = true
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
     mesh.computeBoundingSphere()
-  }, [items])
+  }, [items, highlight])
 
   if (items.length === 0) return null
 

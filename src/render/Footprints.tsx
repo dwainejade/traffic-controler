@@ -19,11 +19,15 @@ function shadeAt(y: number, height: number, isRoof: boolean): number {
   return 0.78 + 0.22 * (height <= 0 ? 1 : y / height)
 }
 
-function buildGeometry(items: BuildingFootprint[]): THREE.BufferGeometry {
+function buildGeometry(
+  items: BuildingFootprint[],
+  highlight?: Map<number, string>,
+): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = []
   const tint = new THREE.Color()
 
-  for (const item of items) {
+  for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+    const item = items[itemIndex]
     if (item.polygon.length < 3) continue
 
     /*
@@ -52,7 +56,10 @@ function buildGeometry(items: BuildingFootprint[]): THREE.BufferGeometry {
 
     const pos = geom.getAttribute('position')
     const colors = new Float32Array(pos.count * 3)
-    tint.set(PALETTE.buildingTints[item.tint % PALETTE.buildingTints.length])
+    tint.set(
+      highlight?.get(itemIndex) ??
+        PALETTE.buildingTints[item.tint % PALETTE.buildingTints.length],
+    )
 
     for (let i = 0; i < pos.count; i++) {
       const y = pos.getY(i)
@@ -106,8 +113,19 @@ function buildGeometry(items: BuildingFootprint[]): THREE.BufferGeometry {
   return merged
 }
 
-export function Footprints({ items }: { items: BuildingFootprint[] }) {
-  const geom = useMemo(() => buildGeometry(items), [items])
+/**
+ * @param highlight Destination buildings, by index into `items`. Baked into the
+ * vertex colours like every other tint here — there is no instance colour to
+ * override, because the whole street is one merged mesh.
+ */
+export function Footprints({
+  items,
+  highlight,
+}: {
+  items: BuildingFootprint[]
+  highlight?: Map<number, string>
+}) {
+  const geom = useMemo(() => buildGeometry(items, highlight), [items, highlight])
   useEffect(() => () => geom.dispose(), [geom])
 
   if (items.length === 0) return null

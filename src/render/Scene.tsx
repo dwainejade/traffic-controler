@@ -18,6 +18,10 @@ import { Footprints } from "./Footprints";
 import { Shopfronts } from "./Shopfronts";
 import { Trees } from "./Trees";
 import { scatterLevel } from "./scatter";
+import { pickDestinations } from "./destinations";
+import { TransitLayer, useTransitLayer } from "./TransitLayer";
+import { DESTINATION_COLORS } from "../art/transit";
+import { useTransit } from "../ui/transitStore";
 import { Controls } from "./Controls";
 import { CinematicCamera } from "./CinematicCamera";
 import { WalkCamera } from "./WalkCamera";
@@ -370,6 +374,28 @@ const EMPTY_LIGHTS: THREE.Object3D[] = [];
 
 export function Scene({ level, world }: { level: LevelDef; world: World }) {
   const { buildings, trees } = useMemo(() => scatterLevel(level), [level]);
+
+  /*
+   * Transit mode's destinations, chosen from the buildings that are actually
+   * being drawn — surveyed outlines where the level has them, scattered boxes
+   * otherwise. Picked here rather than inside the transit layer because the
+   * coloured building and the place people walk to have to be the same object,
+   * and only the renderer knows which buildings exist.
+   */
+  const transitOn = useTransit((s) => s.enabled);
+  const destinations = useMemo(
+    () => (transitOn ? pickDestinations(level, buildings) : []),
+    [transitOn, level, buildings],
+  );
+  const destinationTints = useMemo(() => {
+    const map = new Map<number, string>();
+    destinations.forEach((d, i) =>
+      map.set(d.building, DESTINATION_COLORS[i % DESTINATION_COLORS.length]),
+    );
+    return map;
+  }, [destinations]);
+
+  useTransitLayer(world, level, destinations);
   const showTraffic = useHud((s) => s.layers.traffic);
   const showLabels = useHud((s) => s.layers.labels);
   const showStreetSigns = useHud((s) => s.layers.streetSigns);
@@ -468,9 +494,9 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       {showStreetLights && <StreetLights level={level} />}
       {/* Surveyed outlines where the level has them, scattered boxes otherwise. */}
       {level.footprints?.length ? (
-        <Footprints items={level.footprints} />
+        <Footprints items={level.footprints} highlight={destinationTints} />
       ) : (
-        <Buildings items={buildings} />
+        <Buildings items={buildings} highlight={destinationTints} />
       )}
       {showShops && level.shopfronts?.length ? (
         <Shopfronts fronts={level.shopfronts} />
@@ -493,6 +519,12 @@ export function Scene({ level, world }: { level: LevelDef; world: World }) {
       {showParking && <ParkedCars world={world} />}
       {showTraffic && <Simulation world={world} />}
       {showTraffic && <CrashFocus world={world} />}
+      {/*
+        Over the traffic, under the post-processing. A drawn line is the
+        player's diagram of the city and belongs on top of it, but it is not a
+        light source and has no business in the bloom pass.
+      */}
+      <TransitLayer level={level} world={world} destinations={destinations} />
       {/* Nothing to composite if both effects are off — skip the whole pass. */}
       {(depthOfField || bloom) && (
         <PostFX half={level.half} depthOfField={depthOfField} bloom={bloom} />

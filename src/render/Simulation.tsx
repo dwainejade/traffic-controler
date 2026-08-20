@@ -2,6 +2,8 @@ import { useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { INDICATOR, VEHICLE_COLORS } from "../art/palette";
+import { LINE_COLORS, MUTED_VEHICLE_COLORS } from "../art/transit";
+import { useTransit } from "../ui/transitStore";
 import { SKY } from "../art/daylight";
 import { FIXED_DT, VEHICLE, type World } from "../sim/world";
 import {
@@ -113,6 +115,7 @@ const BRAKELAMP_GEOM = new THREE.BoxGeometry(0.42, 0.3, 0.26);
 const BRAKING = -0.6;
 
 export function Simulation({ world }: { world: World }) {
+  const transitOn = useTransit((s) => s.enabled);
   const carBodies = useRef<THREE.InstancedMesh>(null);
   const truckBodies = useRef<THREE.InstancedMesh>(null);
   const busBodies = useRef<THREE.InstancedMesh>(null);
@@ -218,6 +221,11 @@ export function Simulation({ world }: { world: World }) {
       // indicators out of lockstep the way real ones drift apart.
       const now = world.stats.elapsed;
 
+      // Read once a frame, not once a car. `car.colour` is an index and the two
+      // palettes are the same distribution in the same order, so swapping the
+      // array is the whole of the change — no car repaints when the mode does.
+      const fleet = transitOn ? MUTED_VEHICLE_COLORS : VEHICLE_COLORS;
+
       let n = 0;
       let nCar = 0;
       let nTruck = 0;
@@ -235,12 +243,23 @@ export function Simulation({ world }: { world: World }) {
         bodyScale.set(spec.width, spec.height, spec.length);
         m.compose(pos, q, bodyScale);
 
-        // A livery overrides the fleet distribution: a bus is blue because it is
-        // a bus, not because the palette rolled that way.
+        /*
+         * A livery overrides the fleet distribution: a bus is blue because it
+         * is a bus, not because the palette rolled that way — and in transit
+         * mode it is the colour of the line it runs, which is the one thing a
+         * player watching three lines cross has to be able to tell apart.
+         *
+         * The general traffic gets quieter at the same time. In the signal game
+         * the cars are the subject and the real fleet distribution is right; in
+         * transit mode they are the weather, and 30% pure white argues with the
+         * drawn lines for the eye.
+         */
         colour.set(
           spec.colour === "palette"
-            ? VEHICLE_COLORS[car.colour % VEHICLE_COLORS.length].hex
-            : spec.colour,
+            ? fleet[car.colour % fleet.length].hex
+            : car.line >= 0
+              ? LINE_COLORS[car.line % LINE_COLORS.length]
+              : spec.colour,
         );
 
         // Each kind has its own mesh — a car's cabin, a truck's cab-and-box,

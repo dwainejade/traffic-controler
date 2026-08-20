@@ -44,4 +44,18 @@ export const LAYER = {
   beam: at(12),
   /** Contact shadows, which belong over the paint a vehicle stands on. */
   shadow: at(13),
+  /**
+   * Transit mode's overlay, above everything painted on the street.
+   *
+   * A drawn bus line is not paint on the road — it is the player's diagram laid
+   * over the city, the way a transit map is — so it goes over the shadows and
+   * the markings rather than into the ladder with them. Its casing sits a step
+   * below the line itself so the two never tear apart.
+   */
+  lineCasing: at(15),
+  line: at(16),
+  /** Stop markers, above the line they punctuate. */
+  stopMarker: at(17),
+  /** The path being drawn, which must be visible over any committed line. */
+  draft: at(18),
 } as const;

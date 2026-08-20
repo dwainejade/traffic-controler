@@ -45,6 +45,7 @@ import { buildRegionIndex, type RegionIndex } from "./region";
 import { mulberry32 } from "../render/geometry";
 import { VEHICLE_COLORS } from "../art/palette";
 import { VEHICLE, conflictRadius, type VehicleKind } from "./vehicles";
+import type { Transit, TransitHost } from "./transit";
 import {
   bindParking,
   buildBusStops,
@@ -215,6 +216,17 @@ const BUS_HEADWAY = 120;
 /** How far out a bus starts slowing for its stop, in metres. */
 const STOP_APPROACH = 30;
 
+/**
+ * The two kinds of stop, as much of them as the driving model needs.
+ *
+ * `dwell` is optional because a transit stop does not have one: how long its
+ * doors stay open is decided when they open, by how many people move.
+ */
+type StopLike = { id: number; laneS: number; dwell?: number };
+
+/** Shared empty result, so the per-step stop lookup never allocates. */
+const EMPTY_STOPS: StopLike[] = [];
+
 export type Car = {
   id: number;
   active: boolean;
@@ -288,6 +300,23 @@ export type Car = {
    */
   dwellLeft: number;
   servedStop: number;
+  /**
+   * Transit mode: this vehicle's route wraps instead of ending.
+   *
+   * A scheduled bus does not arrive somewhere and stop existing — it goes round
+   * again. Wrapping `routeIdx` rather than respawning at the terminus keeps the
+   * vehicle, its passengers and its position on the loop all continuous, which
+   * is what a service is.
+   */
+  loop: boolean;
+  /**
+   * The transit line this vehicle runs, as an index into `LINE_COLORS`, or -1
+   * for anything that is not on one. Read only by the renderer — a bus in the
+   * simulation is a bus whatever colour it is painted.
+   */
+  line: number;
+  /** The transit route id, so the layer can find its own buses again. */
+  routeId: string | null;
 };
 
 export type GameState = "running" | "won" | "lost";
@@ -414,6 +443,23 @@ export class World {
   /** Every bus stop on the map, and the stops on each bus lane. */
   readonly busStops: BusStop[];
   private stopsByLane = new Map<LaneId, BusStop[]>();
+
+  /**
+   * The player's bus network, when transit mode is on. Null in the signal game,
+   * and everything transit adds is behind that null check — with no transit
+   * layer attached the world behaves exactly as it always has.
+   */
+  transit: Transit | null = null;
+
+  /**
+   * The scripted bus service that runs the OSM bus lanes.
+   *
+   * On in the signal game, where a bus is scenery that makes the painted lane
+   * make sense. Off in transit mode, where the buses are the player's and a
+   * second unowned service running beside them would be indistinguishable from
+   * a bug in their own.
+   */
+  ambientBuses = true;
 
   stats: WorldStats = EMPTY_STATS();
 
@@ -686,6 +732,18 @@ export class World {
     };
   }
 
+  /**
+   * Recompute what is being simulated.
+   *
+   * Public because the transit layer changes the answer: adding or deleting a
+   * line changes which lanes are permanently active, and `setRegion` will not
+   * notice — it early-returns whenever the camera has not moved, which after a
+   * click on "Run this line" it has not.
+   */
+  refreshRegion(): void {
+    this.rebuildActive();
+  }
+
   private rebuildActive(): void {
     const region = this.region;
     if (!region) return;
@@ -701,8 +759,28 @@ export class World {
     const wasActive = this.laneActive.slice();
 
     this.laneActive.fill(0);
+
+    /*
+     * A lane a bus route runs on is always simulated, wherever the camera is.
+     *
+     * Clipping to the view is right for the ambient traffic: a car outside the
+     * frame is anonymous, and stopping it costs nothing anybody can observe. A
+     * bus is not anonymous — it is the player's, it is carrying their
+     * passengers, and a service that halts the moment they pan away and
+     * resumes when they pan back is not a service. This is the one thing in the
+     * simulation with an identity the player is keeping score of, so it is the
+     * one thing the region may not switch off.
+     */
+    for (const route of this.transit?.routes ?? []) {
+      for (const id of route.lanes) this.laneActive[id] = 1;
+    }
+
     const lanes: Lane[] = [];
     for (const lane of this.allLanes) {
+      if (this.laneActive[lane.id] === 1) {
+        lanes.push(lane);
+        continue;
+      }
       const dx = centre[lane.id * 2] - x;
       const dz = centre[lane.id * 2 + 1] - z;
       // Against the lane's bounding sphere, so a long lane reaching into the
@@ -713,7 +791,24 @@ export class World {
     }
     this.activeLanes = lanes;
 
+    /*
+     * Junctions on a bus route stay active for the same reason their lanes do,
+     * and it is not a nicety: `stepJunction` is what advances the signal, so a
+     * junction outside the region has a frozen light. A bus that reached one on
+     * red would wait there for as long as the player looked somewhere else.
+     */
+    const onRoute = new Set<NodeId>();
+    for (const route of this.transit?.routes ?? []) {
+      for (const id of route.lanes) {
+        const lane = this.net.lanes[id];
+        if (lane.junction) onRoute.add(lane.junction);
+        if (lane.fromNode) onRoute.add(lane.fromNode);
+        if (lane.toNode) onRoute.add(lane.toNode);
+      }
+    }
+
     this.activeJunctions = this.allJunctions.filter((j) => {
+      if (onRoute.has(j.nodeId)) return true;
       const p = junctionPos.get(j.nodeId);
       if (!p) return false;
       return Math.hypot(p.x - x, p.z - z) <= radius;
@@ -740,6 +835,19 @@ export class World {
     for (const lane of lanes) {
       if (lane.kind !== "road" || lane.access !== "all") continue;
       if (lane.fromNode === null) continue;
+      /*
+       * Only lanes the region actually reaches may take arrivals. A lane is
+       * also active when a bus route runs on it, and those can be right across
+       * the map — treating one as a way in would spawn ambient traffic into a
+       * street nobody is looking at, on the strength of a bus passing through.
+       */
+      if (
+        Math.hypot(centre[lane.id * 2] - x, centre[lane.id * 2 + 1] - z) -
+          laneRadius[lane.id] >
+        radius
+      ) {
+        continue;
+      }
 
       const isEdge = spawnable.has(lane.id);
       if (!isEdge) {
@@ -1125,6 +1233,7 @@ export class World {
     this.spawn(dt);
     this.unpark(dt);
     this.runBuses(dt);
+    this.transit?.tick(dt);
     this.drive(dt);
     this.retireEscaped();
     this.checkCrashes();
@@ -1324,6 +1433,69 @@ export class World {
   // ----------------------------------------------------------------- buses
 
   /**
+   * Every stop a bus on this lane should be watching for.
+   *
+   * Two sources, and they never overlap: the network's own stops sit on bus
+   * lanes and belong to the ambient service, the player's sit wherever they
+   * drew their line. Merged here rather than in one list because the network's
+   * are built once with the level and the player's change every time a route
+   * does, and rebuilding the former to append to the latter would throw away
+   * the parking layout that was fitted around it.
+   */
+  private stopsFor(laneId: LaneId): StopLike[] {
+    const fixed = this.stopsByLane.get(laneId);
+    const drawn = this.transit?.stopsOnLane(laneId);
+    if (!drawn || drawn.length === 0) return fixed ?? EMPTY_STOPS;
+    if (!fixed) return drawn;
+    return [...fixed, ...drawn];
+  }
+
+  /**
+   * What the transit layer is allowed to do to the world.
+   *
+   * A narrow interface rather than handing it the world, so the layer cannot
+   * reach into the simulation and the simulation stays the thing that owns
+   * every vehicle on the map.
+   */
+  transitHost(): TransitHost {
+    return {
+      net: this.net,
+      spawnBus: (route, at, routeId, colour) => {
+        if (route.length === 0) return null;
+        const lane = this.net.lanes[route[0]];
+        if (!lane || lane.kind !== "road") return null;
+
+        // Never materialise on top of whatever is already standing there.
+        const rear = lane.cars[lane.cars.length - 1];
+        if (rear !== undefined && Math.abs(this.cars[rear].s - at) < VEHICLE.bus.length + 4) {
+          return null;
+        }
+
+        const car = this.create([...route], 0, "bus", Math.min(at, lane.length * 0.9));
+        car.loop = true;
+        car.line = colour;
+        car.routeId = routeId;
+        return car.id;
+      },
+      despawnBus: (carId) => {
+        const car = this.cars[carId];
+        // `left` rather than `delivered`: a bus taken off because its line was
+        // deleted did not complete a journey, and counting it as one would put
+        // a number in the score for something the player undid.
+        if (car) this.retire(car, "left");
+      },
+      carPose: (carId, out) => {
+        const car = this.cars[carId];
+        if (!car || !car.active) return false;
+        this.pose(car, out);
+        return true;
+      },
+      carActive: (carId) => this.cars[carId]?.active === true,
+      regionChanged: () => this.refreshRegion(),
+    };
+  }
+
+  /**
    * Run the service.
    *
    * Buses are not drawn from the demand pool. A scheduled service does not
@@ -1337,6 +1509,7 @@ export class World {
    * two routes rather than one.
    */
   private runBuses(dt: number): void {
+    if (!this.ambientBuses) return;
     if (this.busEntries.length === 0) return;
 
     for (const entry of this.busEntries) {
@@ -1575,6 +1748,9 @@ export class World {
     car.sinceChange = CHANGE_COOLDOWN;
     car.dwellLeft = 0;
     car.servedStop = -1;
+    car.loop = false;
+    car.line = -1;
+    car.routeId = null;
 
     if (id === undefined) this.cars.push(car);
 
@@ -1707,10 +1883,19 @@ export class World {
 
         // Pulled up at a stop it has not served: open the doors.
         if (car.kind === "bus" && car.v < 0.6) {
-          for (const stop of this.stopsByLane.get(car.lane) ?? []) {
+          for (const stop of this.stopsFor(car.lane)) {
             if (stop.id === car.servedStop) continue;
             if (Math.abs(stop.laneS - car.s) > 1.2) continue;
-            car.dwellLeft = stop.dwell;
+            /*
+             * A transit stop's dwell is not a property of the stop, it is how
+             * long the people there take to get on — so the layer is asked at
+             * the moment the doors open rather than at the moment the stop was
+             * placed. A busy stop genuinely holds up the street behind it,
+             * which is what gives stop placement a cost.
+             */
+            car.dwellLeft = this.transit?.stop(stop.id)
+              ? this.transit.serviceStop(car.id, stop.id)
+              : (stop.dwell ?? 0);
             car.servedStop = stop.id;
             break;
           }
@@ -2047,7 +2232,7 @@ export class World {
      * never arrives at it.
      */
     if (car.kind === "bus" && car.dwellLeft <= 0) {
-      for (const stop of this.stopsByLane.get(car.lane) ?? []) {
+      for (const stop of this.stopsFor(car.lane)) {
         if (stop.id === car.servedStop) continue;
         const toStop = stop.laneS - car.s;
         if (toStop < 0 || toStop > STOP_APPROACH) continue;
@@ -2328,7 +2513,21 @@ export class World {
         lane.cars.shift();
 
         if (car.routeIdx >= car.route.length - 1) {
-          this.retire(car, "delivered");
+          if (!car.loop) {
+            this.retire(car, "delivered");
+            continue;
+          }
+          /*
+           * Round again. The stop it served last is forgotten here and nowhere
+           * else: `servedStop` is what keeps a bus from dwelling twice at the
+           * stop it is still alongside, and a bus that never cleared it would
+           * sail past that one stop on every subsequent lap.
+           */
+          car.s -= lane.length;
+          car.routeIdx = 0;
+          car.lane = car.route[0];
+          car.servedStop = -1;
+          this.net.lanes[car.lane].cars.push(car.id);
           continue;
         }
 

@@ -3,6 +3,7 @@ import { useLevels } from "./levels/registry";
 import { Scene } from "./render/Scene";
 import { Hud } from "./ui/Hud";
 import { LevelSheet } from "./ui/LevelSheet";
+import { TransitPanel } from "./ui/TransitPanel";
 import { measure, validateLevel } from "./sim/validate";
 import { warmupFor, type LevelDef } from "./sim/types";
 import { World } from "./sim/world";
@@ -116,6 +117,7 @@ export default function App() {
         }}
         hasNext={index < levels.length - 1}
       />
+      <TransitPanel />
     </div>
   );
 }
