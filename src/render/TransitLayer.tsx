@@ -24,6 +24,7 @@ import {
   extendDraft,
   publishTransit,
   setHover,
+  toggleStop,
   transit,
   useTransit,
 } from '../ui/transitStore'
@@ -59,10 +60,10 @@ const STOP_PIXELS = 13
 const STOP_MIN_M = 5
 const STOP_MAX_M = 14
 
-/** The pin over a destination building. */
-const MARKER_PIXELS = 4
-const MARKER_MIN_M = 1.1
-const MARKER_MAX_M = 5
+/** The pin over a destination building. Wider than a stop — it is the goal. */
+const MARKER_PIXELS = 20
+const MARKER_MIN_M = 8
+const MARKER_MAX_M = 26
 
 /** How close the pointer must come to a junction for the draw tool to snap. */
 const SNAP_RADIUS = 55
@@ -82,6 +83,11 @@ RIDER_GEOM.translate(0, RIDER_HEIGHT / 2, 0)
 const STOP_GEOM = new THREE.CircleGeometry(2.6, 16).rotateX(-Math.PI / 2)
 const STOP_RIM_GEOM = new THREE.CircleGeometry(3.6, 16).rotateX(-Math.PI / 2)
 const NODE_GEOM = new THREE.CircleGeometry(6, 20).rotateX(-Math.PI / 2)
+
+/** Destination pin: a unit disc on the ground and a slim stem off the roof. */
+const PIN_DISC = new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2)
+const PIN_STEM_HEIGHT = 30
+const PIN_STEM = new THREE.CylinderGeometry(0.6, 0.6, PIN_STEM_HEIGHT, 8)
 
 // ------------------------------------------------------------------- lines
 
@@ -109,7 +115,9 @@ function TransitLines({ world }: { world: World }) {
         casing: ribbonGeometry(points, LAYER.lineCasing),
         lineMat: ribbonMaterial(LINE_COLORS[route.colour % LINE_COLORS.length], 1),
         casingMat: ribbonMaterial(LINE_CASING, 0.9),
-        stops: route.stops.filter((s) => s.enabled),
+        // All of them, enabled or not: a skipped stop is still a thing the
+        // player can click to bring back.
+        stops: route.stops,
       }
     })
     // `version` is the dependency that matters — the layer mutates in place and
@@ -180,8 +188,17 @@ function TransitLines({ world }: { world: World }) {
 function StopMarkers({ stops, dim }: { stops: TransitStop[]; dim: boolean }) {
   const rim = useRef<THREE.InstancedMesh>(null)
   const face = useRef<THREE.InstancedMesh>(null)
+  const drawing = useTransit((s) => s.drawing)
+  const down = useRef<{ x: number; y: number } | null>(null)
+
   const scratch = useMemo(
-    () => ({ m: new THREE.Matrix4(), q: new THREE.Quaternion(), p: new THREE.Vector3(), s: new THREE.Vector3() }),
+    () => ({
+      m: new THREE.Matrix4(),
+      q: new THREE.Quaternion(),
+      p: new THREE.Vector3(),
+      s: new THREE.Vector3(),
+      c: new THREE.Color(),
+    }),
     [],
   )
 
@@ -194,14 +211,24 @@ function StopMarkers({ stops, dim }: { stops: TransitStop[]; dim: boolean }) {
       halfWidthFor(radius, state.size.height, STOP_PIXELS, STOP_MIN_M, STOP_MAX_M) / 2.6
 
     stops.forEach((stop, i) => {
+      /*
+       * A skipped stop keeps its ring and loses its face — it collapses to a
+       * hole rather than disappearing. Removing it outright would leave the
+       * player no way to put it back, and no way to see that the line has a
+       * decision sitting on that corner at all.
+       */
+      const shown = stop.enabled ? scale : scale * 0.9
       scratch.p.set(stop.x, LAYER.stopMarker, stop.z)
-      scratch.s.set(scale, 1, scale)
+      scratch.s.set(shown, 1, shown)
       scratch.m.compose(scratch.p, scratch.q, scratch.s)
       rim.current!.setMatrixAt(i, scratch.m)
+
       scratch.p.y = LAYER.stopMarker + 0.01
+      scratch.s.set(stop.enabled ? shown : 0.001, 1, stop.enabled ? shown : 0.001)
       scratch.m.compose(scratch.p, scratch.q, scratch.s)
       face.current!.setMatrixAt(i, scratch.m)
     })
+
     rim.current.count = stops.length
     face.current.count = stops.length
     rim.current.instanceMatrix.needsUpdate = true
@@ -210,9 +237,43 @@ function StopMarkers({ stops, dim }: { stops: TransitStop[]; dim: boolean }) {
 
   if (stops.length === 0) return null
 
+  /*
+   * Clicks land on the rim, which is the larger of the two discs and is present
+   * whether the stop is on or off. Gated on not drawing: while a line is being
+   * laid, a click near a stop is a click at the junction beside it, and having
+   * it mean two things at once would make both unreliable.
+   */
+  const clickable = !drawing
+
   return (
     <group>
-      <instancedMesh ref={rim} args={[STOP_RIM_GEOM, undefined, stops.length]} frustumCulled={false}>
+      <instancedMesh
+        ref={rim}
+        args={[STOP_RIM_GEOM, undefined, stops.length]}
+        frustumCulled={false}
+        onPointerDown={
+          clickable
+            ? (e) => {
+                down.current = { x: e.clientX, y: e.clientY }
+              }
+            : undefined
+        }
+        onPointerUp={
+          clickable
+            ? (e) => {
+                const from = down.current
+                down.current = null
+                if (!from) return
+                // A pan that happened to start on a stop is not a click on it.
+                if (Math.hypot(e.clientX - from.x, e.clientY - from.y) > 6) return
+                const i = e.instanceId
+                if (i === undefined || !stops[i]) return
+                e.stopPropagation()
+                toggleStop(stops[i].id)
+              }
+            : undefined
+        }
+      >
         <meshBasicMaterial color={STOP_RIM} transparent opacity={dim ? 0.3 : 0.85} depthWrite={false} />
       </instancedMesh>
       <instancedMesh ref={face} args={[STOP_GEOM, undefined, stops.length]} frustumCulled={false}>
@@ -328,62 +389,103 @@ function Riders() {
  * place is findable from anywhere on the map.
  */
 function Destinations({ sites }: { sites: DestinationSite[] }) {
-  const group = useRef<THREE.Group>(null)
+  const pins = useRef<THREE.Group>(null)
 
   /*
-   * The markers thicken with distance, like everything else in this layer. Not
-   * their height, though — a marker that grew taller as the camera pulled back
-   * would leave the roof it is standing on. Only the width, so a pin stays a
-   * pin and stays findable.
+   * Only the pins take the camera scaling — not the catchment rings under them,
+   * which are a real 400m on the ground and mean nothing at any other size. An
+   * earlier version scaled the whole site group and pushed every ring out to
+   * two kilometres, which put them off the map entirely: the rings looked like
+   * they had stopped working, and the bug was in the pins.
+   *
+   * Width only, and the stem's height is left alone: a marker that grew taller
+   * as the camera pulled back would climb off the roof it is standing on.
    */
   useFrame((state) => {
-    if (!group.current) return
+    if (!pins.current) return
     const radius = viewRadius(state.camera, state.size.width, state.size.height)
-    const wide =
-      halfWidthFor(radius, state.size.height, MARKER_PIXELS, MARKER_MIN_M, MARKER_MAX_M) / 1.1
-    for (const child of group.current.children) child.scale.set(wide, 1, wide)
+    const wide = halfWidthFor(
+      radius,
+      state.size.height,
+      MARKER_PIXELS,
+      MARKER_MIN_M,
+      MARKER_MAX_M,
+    )
+    for (const pin of pins.current.children) {
+      // The disc is authored at a 1m radius and the stem at 0.6m, so the scale
+      // is the half-width itself and reads as "this many pixels across".
+      pin.scale.set(wide, 1, wide)
+    }
   })
 
   return (
-    <group ref={group}>
-      {sites.map((site, i) => {
-        const colour = DESTINATION_COLORS[i % DESTINATION_COLORS.length]
-        const top = site.height + 26
-        return (
-          <group key={i} position={[site.x, 0, site.z]}>
-            <mesh position={[0, site.height + 13, 0]}>
-              <cylinderGeometry args={[1.1, 1.1, 26, 8]} />
-              <meshBasicMaterial color={colour} />
-            </mesh>
-            <mesh position={[0, top, 0]}>
-              <sphereGeometry args={[4.2, 14, 10]} />
-              <meshBasicMaterial color={colour} />
-            </mesh>
-            {/*
-              The catchment: everybody inside this ring can reach the building
-              on foot from a stop, and everybody outside it cannot. Drawn faint
-              and only in draw mode, because it is a rule the player needs while
-              they are placing a line and clutter at every other moment.
-            */}
-            <CatchmentRing colour={colour} />
-          </group>
-        )
-      })}
+    <group>
+      <group ref={pins}>
+        {sites.map((site, i) => {
+          const colour = DESTINATION_COLORS[i % DESTINATION_COLORS.length]
+          return (
+            <group key={i} position={[site.x, 0, site.z]}>
+              {/*
+                A disc on the ground, like a stop marker, rather than a ball in
+                the air. The camera is a 3/4 top-down one and a mark on the
+                ground is what it reads best; a floating sphere at map zoom is
+                a blob with no obvious footing.
+              */}
+              <mesh geometry={PIN_DISC} position={[0, LAYER.stopMarker + 0.02, 0]}>
+                <meshBasicMaterial color={colour} transparent opacity={0.9} depthWrite={false} />
+              </mesh>
+              {/*
+                And a stem off the roof, because a mark on the ground is exactly
+                what a taller building next door hides — which on a real skyline
+                is most of them.
+              */}
+              <mesh geometry={PIN_STEM} position={[0, site.height + PIN_STEM_HEIGHT / 2, 0]}>
+                <meshBasicMaterial color={colour} />
+              </mesh>
+            </group>
+          )
+        })}
+      </group>
+
+      {/*
+        The catchment: everybody inside this ring can reach the building on foot
+        from a stop, and everybody outside it cannot. Drawn faint and only in
+        draw mode, because it is a rule the player needs while they are placing
+        a line and clutter at every other moment.
+      */}
+      <CatchmentRings sites={sites} />
     </group>
   )
 }
 
-function CatchmentRing({ colour }: { colour: string }) {
+function CatchmentRings({ sites }: { sites: DestinationSite[] }) {
   const drawing = useTransit((s) => s.drawing)
   const geom = useMemo(
-    () => new THREE.RingGeometry(WALK_RADIUS - 4, WALK_RADIUS, 72).rotateX(-Math.PI / 2),
+    () => new THREE.RingGeometry(WALK_RADIUS - 6, WALK_RADIUS, 72).rotateX(-Math.PI / 2),
     [],
   )
+  useEffect(() => () => geom.dispose(), [geom])
+
   if (!drawing) return null
+
   return (
-    <mesh geometry={geom} position={[0, LAYER.draft, 0]}>
-      <meshBasicMaterial color={colour} transparent opacity={0.28} depthWrite={false} />
-    </mesh>
+    <group>
+      {sites.map((site, i) => (
+        <mesh
+          key={i}
+          geometry={geom}
+          position={[site.x, LAYER.draft, site.z]}
+        >
+          <meshBasicMaterial
+            color={DESTINATION_COLORS[i % DESTINATION_COLORS.length]}
+            transparent
+            opacity={0.3}
+            depthWrite={false}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      ))}
+    </group>
   )
 }
 

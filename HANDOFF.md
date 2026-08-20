@@ -56,6 +56,20 @@
 > buses. Bay Ridge itself fails phase validation at `j452196762`, which is where
 > most of them come from and is a pre-existing level bug.
 >
+>
+> **The two ways a trip fails are counted apart**, because they ask for opposite
+> fixes: `gaveUp` means a line reaches them and is too infrequent — add a bus,
+> or skip some of its stops; `noService` means no line is within a 400m walk of
+> both ends — draw one. Measured on Bay Ridge with two lines and four buses,
+> the split runs about 9:1 toward `gaveUp`, which is the right pressure: the
+> binding constraint is frequency, and the player can see it.
+>
+> **Turning a stop off strands everyone booked through it, on purpose.** Not
+> just the people standing on it — a rider already on a bus and booked to alight
+> there would otherwise ride for ever, because the bus stops asking about a
+> disabled stop and so never opens its doors. The ledger balances either way, so
+> that leak is invisible; riders simply accumulate on board.
+>
 > **Not modelled, deliberately:** transfers (one bus or no bus), a walking
 > network (straight lines at 1.3 m/s within 400m), and any economy — buses are
 > placed, not bought. Each is a layer that sits cleanly on top of what is here.

@@ -25,6 +25,8 @@ export type RouteMirror = {
   /** Buses actually on the road, which lags after a tow or a blocked terminus. */
   running: number
   stops: number
+  /** Stops on the line the player has switched off. */
+  skipped: number
   /** Kilometres round the loop. */
   km: number
   /** People standing at this line's stops right now. */
@@ -55,6 +57,8 @@ const EMPTY_STATS: TransitStats = {
   spawned: 0,
   delivered: 0,
   missed: 0,
+  gaveUp: 0,
+  noService: 0,
   waiting: 0,
   riding: 0,
   walking: 0,
@@ -122,6 +126,7 @@ export function publishTransit(layer: Transit): void {
       buses: r.buses,
       running: r.running,
       stops: r.stops.filter((s) => s.enabled).length,
+      skipped: r.stops.length - r.stops.filter((s) => s.enabled).length,
       km: r.length / 1000,
       waiting,
       riding: 0,
@@ -227,6 +232,14 @@ export function setBuses(id: RouteId, count: number): void {
   const layer = current
   if (!layer) return
   layer.setBuses(id, count)
+  publishTransit(layer)
+}
+
+/** Turn a stop on or off. The express-versus-local decision. */
+export function toggleStop(id: number): void {
+  const layer = current
+  if (!layer) return
+  layer.toggleStop(id)
   publishTransit(layer)
 }
 

@@ -44,7 +44,11 @@ capacity, green-wave resonance).
 - Riders are painted the colour of the building they are trying to reach, so a
   crowd on a corner with no line near it is the map telling you where to draw
 - Signals run themselves — there is no light to program in this mode
-- Scored on delivered against missed, with mean journey and mean wait
+- Click a stop to skip it — every stop a line keeps costs it a dwell each way
+  and buys it the corner it stands on, which is the express-versus-local decision
+- Scored on delivered against missed, and the two ways a trip fails are shown
+  apart because they ask for opposite fixes: giving up at a stop wants another
+  bus, no line in walking distance wants a line drawn
 - Console harness: `TRANSIT` is the live layer in dev, `TRANSIT.ledgerBalances()`
   asserts no rider has leaked out of the model
 

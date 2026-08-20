@@ -61,16 +61,38 @@ export function TransitPanel() {
 
       <div className="transit-score">
         <Stat label="Delivered" value={String(stats.delivered)} />
-        <Stat label="Missed" value={String(stats.missed)} tone={stats.missed > 0 ? 'bad' : undefined} />
         <Stat label="Served" value={served === null ? '—' : `${served}%`} />
-        <Stat label="Waiting" value={String(stats.waiting)} />
-        <Stat label="Riding" value={String(stats.riding)} />
-        <Stat
-          label="Unreached"
-          value={String(stats.unserved)}
-          tone={stats.unserved > 0 ? 'bad' : undefined}
-        />
         <Stat label="Mean trip" value={clock(stats.meanJourney)} />
+        <Stat label="Riding" value={String(stats.riding)} />
+        <Stat label="Waiting" value={String(stats.waiting)} />
+        <Stat label="Walking" value={String(stats.walking)} />
+      </div>
+
+      {/*
+        The two ways a trip fails, apart, because they ask for opposite fixes:
+        somebody who gave up standing at a stop wants more buses on a line that
+        exists; somebody with no service wants a line drawn at all.
+      */}
+      <div className="transit-fail">
+        <Fail
+          label="gave up waiting"
+          value={stats.gaveUp}
+          hint="A line reaches them, but not often enough. Add a bus, or skip some of its stops."
+        />
+        <Fail
+          label="no line reaches them"
+          value={stats.noService}
+          /*
+           * Only this row carries a live figure, and only because it has one
+           * worth carrying: these are people standing on a corner right now
+           * with nowhere to go, and they are on the map to be looked at. The
+           * other row's equivalent would be everybody waiting, which is already
+           * in the score above and means something quite different.
+           */
+          live={stats.unserved}
+          liveLabel="on the map now"
+          hint="Nothing within a 400m walk of both ends of their trip."
+        />
       </div>
 
       {drawing ? (
@@ -96,9 +118,17 @@ export function TransitPanel() {
           </div>
         </div>
       ) : (
-        <button className="transit-new" onClick={startDrawing}>
-          Draw a line
-        </button>
+        <>
+          <button className="transit-new" onClick={startDrawing}>
+            Draw a line
+          </button>
+          {routes.length > 0 && (
+            <p className="transit-hint transit-tip">
+              Click a stop on the map to skip it. Every stop a line keeps costs it
+              a dwell each way and buys it the corner it stands on.
+            </p>
+          )}
+        </>
       )}
 
       <ul className="transit-lines">
@@ -123,6 +153,7 @@ export function TransitPanel() {
                 <strong>{route.name}</strong>
                 <span className="transit-line-meta">
                   {route.km.toFixed(1)} km · {route.stops} stops
+                  {route.skipped > 0 && ` · ${route.skipped} skipped`}
                 </span>
               </div>
               <div className="transit-line-stats">
@@ -175,6 +206,33 @@ export function TransitPanel() {
           </li>
         ))}
       </ul>
+    </div>
+  )
+}
+
+function Fail({
+  label,
+  value,
+  live,
+  liveLabel,
+  hint,
+}: {
+  label: string
+  value: number
+  /** How many are in this state right now, as opposed to the running total. */
+  live?: number
+  liveLabel?: string
+  hint: string
+}) {
+  return (
+    <div className="transit-fail-row" title={hint}>
+      <span className="transit-fail-value">{value}</span>
+      <span className="transit-fail-label">{label}</span>
+      {live !== undefined && live > 0 && (
+        <span className="transit-fail-live">
+          {live} {liveLabel}
+        </span>
+      )}
     </div>
   )
 }

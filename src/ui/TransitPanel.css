@@ -110,6 +110,47 @@
   letter-spacing: 0.04em;
 }
 
+/* --- the two ways a trip fails */
+
+.transit-fail {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  border-radius: 12px;
+  background: rgba(217, 72, 63, 0.08);
+}
+
+.transit-fail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.transit-fail-value {
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: #b8443c;
+  min-width: 34px;
+  text-align: right;
+}
+
+.transit-fail-label {
+  font-size: 12px;
+  color: #5b636d;
+}
+
+.transit-fail-live {
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: #b8443c;
+  background: rgba(217, 72, 63, 0.14);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
 /* --- drawing */
 
 .transit-new,
@@ -151,6 +192,10 @@
   margin: 0;
   font-size: 12px;
   color: #5b636d;
+}
+
+.transit-tip {
+  margin: -4px 2px 0;
 }
 
 .transit-count {

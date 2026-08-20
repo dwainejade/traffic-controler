@@ -226,13 +226,36 @@ export type Rider = {
   waited: number
   /** The bus they are on, or -1. */
   bus: number
+  /**
+   * Where in the crowd at a stop they are standing.
+   *
+   * Fixed when they arrive and never repacked. Everybody drawn on the stop's
+   * own point makes two hundred people one blob, and a blob is the one thing
+   * the whole colour scheme is for — a crowd has to be countable at a glance,
+   * or "this stop is overwhelmed" looks exactly like "somebody is waiting
+   * here". Not repacking means gaps open as people board, which is what a real
+   * queue does.
+   */
+  slot: number
 }
 
 export type TransitStats = {
   spawned: number
   delivered: number
-  /** Gave up at a stop, or never had a service to use. */
+  /** Everyone who did not get there: `gaveUp` plus `noService`. */
   missed: number
+  /**
+   * Stood at a stop until their patience ran out.
+   *
+   * The two halves of `missed` ask for opposite fixes and so are counted apart.
+   * This one says the line is there and too slow — more buses, or fewer stops
+   * on it. The other says there is no line, and the answer is to draw one. A
+   * single number tells the player they are failing without telling them at
+   * what, which is the least useful thing a score can do.
+   */
+  gaveUp: number
+  /** Never found a line within walking distance at either end. */
+  noService: number
   /** Standing at a stop, waiting for a bus that is coming. */
   waiting: number
   riding: number
@@ -274,6 +297,41 @@ export type TransitHost = {
 }
 
 // -------------------------------------------------------------------- helpers
+
+/**
+ * How a crowd stands at a stop: a line along the kerb, wrapping into rows.
+ *
+ * Two hundred people in single file is two hundred metres of pavement and reads
+ * as a road marking. Wrapped, it is a block whose size is its size, which is the
+ * thing the player has to be able to judge from across the map.
+ */
+const QUEUE_ROWS = 6
+const QUEUE_ALONG = 1.4
+const QUEUE_ACROSS = 1.5
+/** Clear of the carriageway: people stand on the footway, not in the bus lane. */
+const QUEUE_KERB = 3.5
+
+function standAt(stop: TransitStop, rider: Rider): void {
+  // The stop's angle is its bus's heading, so forward is (sin, cos) and the
+  // kerb side — the driver's right — is (-cos, sin), the same convention the
+  // network and the road markings use.
+  const fx = Math.sin(stop.angle)
+  const fz = Math.cos(stop.angle)
+  const rx = -fz
+  const rz = fx
+
+  /*
+   * Depth first, then along the kerb. The other way round — filling along the
+   * street and then stepping back — puts a big crowd thirty metres into the
+   * buildings behind it; this way it spills down the block instead, which is
+   * both what happens and what makes the size of it legible from above.
+   */
+  const across = QUEUE_KERB + (rider.slot % QUEUE_ROWS) * QUEUE_ACROSS
+  const along = Math.floor(rider.slot / QUEUE_ROWS) * QUEUE_ALONG
+
+  rider.x = stop.x + fx * along + rx * across
+  rider.z = stop.z + fz * along + rz * across
+}
 
 /** Composite key for the lane-and-route stop index. */
 function key(laneId: LaneId, routeId: RouteId): string {
@@ -481,6 +539,8 @@ export class Transit {
     spawned: 0,
     delivered: 0,
     missed: 0,
+    gaveUp: 0,
+    noService: 0,
     waiting: 0,
     riding: 0,
     walking: 0,
@@ -699,15 +759,37 @@ export class Transit {
     return { lanes: [...route.lanes], at: 0 }
   }
 
-  /** Turn a stop on or off without redrawing the line. */
+  /**
+   * Turn a stop on or off without redrawing the line.
+   *
+   * This is the express-versus-local decision, and it is a real one: every stop
+   * a line keeps costs it a dwell in each direction and buys it the people
+   * within a walk of that corner. Skipping the quiet ones is how a long line
+   * stays quick enough to be worth riding.
+   */
   toggleStop(id: StopId): void {
     const stop = this.stopById.get(id)
     if (!stop) return
     stop.enabled = !stop.enabled
+
     if (!stop.enabled) {
-      for (const riderId of stop.waiting) this.strand(this.riders[riderId])
+      /*
+       * Everybody whose plan went through this stop loses it — not just the
+       * people standing on it. A rider already on a bus, booked to get off
+       * here, would otherwise ride for ever: the bus stops asking about a
+       * disabled stop, so it never opens its doors and never puts them down.
+       * That is a leak, and an invisible one — the ledger balances, the riders
+       * simply accumulate on board.
+       */
+      for (const rider of this.riders) {
+        if (!rider.active) continue
+        if (rider.boardStop !== id && rider.alightStop !== id) continue
+        if (rider.phase === 'arriving') continue
+        this.strand(rider)
+      }
       stop.waiting.length = 0
     }
+
     this.reindexStops()
     this.version++
   }
@@ -820,7 +902,7 @@ export class Transit {
            */
           rider.waited += dt
           unserved++
-          if (rider.waited >= UNSERVED_LINGER) this.retire(rider, 'missed')
+          if (rider.waited >= UNSERVED_LINGER) this.retire(rider, 'noService')
           break
 
         case 'walking':
@@ -839,10 +921,13 @@ export class Transit {
           // Arrived at the stop, joins the back of the queue.
           const stop = this.stopById.get(rider.boardStop)
           if (!stop || !stop.enabled) {
+            // The stop they were walking to was turned off under them.
             this.strand(rider)
             break
           }
           rider.phase = 'waiting'
+          rider.slot = stop.waiting.length
+          standAt(stop, rider)
           stop.waiting.push(rider.id)
           break
         }
@@ -856,7 +941,7 @@ export class Transit {
               const at = stop.waiting.indexOf(rider.id)
               if (at >= 0) stop.waiting.splice(at, 1)
             }
-            this.retire(rider, 'missed')
+            this.retire(rider, 'gaveUp')
           }
           break
         }
@@ -1068,6 +1153,7 @@ export class Transit {
       rider.toZ = to.z
       rider.x = stop.x
       rider.z = stop.z
+      rider.slot = 0
       rider.walked = 0
       rider.walkLength = dist(stop.x, stop.z, to.x, to.z)
     }
@@ -1128,7 +1214,13 @@ export class Transit {
    */
   private strand(rider: Rider | undefined): void {
     if (!rider || !rider.active) return
-    this.retire(rider, 'missed')
+    /*
+     * Counted as no service, not as impatience: the line they were relying on
+     * stopped existing, which is the same thing from the rider's side as it
+     * never having been drawn. Blaming their patience for a bus the player
+     * deleted would point the score at the wrong fix.
+     */
+    this.retire(rider, 'noService')
   }
 
   private take(): Rider {
@@ -1158,12 +1250,13 @@ export class Transit {
       age: 0,
       waited: 0,
       bus: -1,
+      slot: 0,
     }
     this.riders.push(rider)
     return rider
   }
 
-  private retire(rider: Rider, how: 'delivered' | 'missed'): void {
+  private retire(rider: Rider, how: 'delivered' | 'gaveUp' | 'noService'): void {
     if (!rider.active) return
     rider.active = false
     this.freeRiders.push(rider.id)
@@ -1177,8 +1270,10 @@ export class Transit {
       rider.bus = -1
     }
 
-    if (how === 'missed') {
+    if (how !== 'delivered') {
       this.stats.missed++
+      if (how === 'gaveUp') this.stats.gaveUp++
+      else this.stats.noService++
       return
     }
 
