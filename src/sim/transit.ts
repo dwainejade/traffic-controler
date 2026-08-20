@@ -28,9 +28,10 @@ import {
   chainIsContinuous,
   chainLength,
   lanesLeaving,
-  pathBetween,
+  oppositeLanes,
   pathToLane,
-  pathToNode,
+  pathsToNode,
+  reversePath,
 } from './transitGraph'
 import { VEHICLE } from './vehicles'
 import { mulberry32 } from '../render/geometry'
@@ -65,11 +66,14 @@ const PATIENCE = 600
 /**
  * Seconds an unserved trip stands on the corner before giving up.
  *
- * Long enough to be seen at the speeds this game is watched at, short enough
- * that a city with no network at all does not silt up with a permanent crowd
- * that hides the moment a line starts working.
+ * Long enough that unmet demand *accumulates into something visible*. At
+ * forty-five seconds it did not: a player who had drawn nothing yet saw a
+ * scattering of individuals blink in and out across a whole borough and
+ * reasonably concluded there were no people in the game at all. A city with no
+ * transit silting up with crowds on every corner is not a failure mode, it is
+ * the picture — it is the map saying where to draw.
  */
-const UNSERVED_LINGER = 45
+const UNSERVED_LINGER = 240
 
 /** People on a 40-foot bus, seated and standing. */
 export const BUS_CAPACITY = 60
@@ -80,6 +84,16 @@ const DWELL_PER_RIDER = 0.6
 /** Even an empty stop costs the pull-in and pull-out. */
 const DWELL_MIN = 5
 const DWELL_MAX = 45
+
+/**
+ * Seconds a bus stands at the end of the line before setting off the other way.
+ *
+ * A real layover is minutes; this is shorter because it is also the whole of
+ * the turn-round — the bus is standing still while it changes which way it
+ * faces, and that is what stops the change reading as a glitch. Long enough to
+ * see, short enough not to be the reason a short line is infrequent.
+ */
+const LAYOVER = 15
 
 /**
  * Metres past a junction a stop sits, matching `buildBusStops`.
@@ -158,6 +172,10 @@ export type TransitRoute = {
   lanes: LaneId[]
   /** Where the drawn path ends and the return leg begins, as an index into `lanes`. */
   returnAt: number
+  /** Index into `lanes` where the bus turns round mid-route, or -1. */
+  hopAt: number
+  /** The loop closes with a turn-round at the terminus rather than a movement. */
+  terminusHop: boolean
   stops: TransitStop[]
   /**
    * Buses the player has asked for on this route.
@@ -278,8 +296,21 @@ export type TransitStats = {
 /** What the world needs to be able to do for the transit layer to run. */
 export type TransitHost = {
   net: Network
-  /** Put a bus on `route` at arc length `at` along its first lane. */
-  spawnBus(route: LaneId[], at: number, routeId: RouteId, colour: number): number | null
+  /**
+   * Put a bus on a route, `index` lanes in and `at` metres along that lane.
+   *
+   * `layover` is how long it holds at a turn-round — zero for a line that
+   * closes on a movement a junction actually offers.
+   */
+  spawnBus(spec: {
+    lanes: LaneId[]
+    index: number
+    at: number
+    routeId: RouteId
+    colour: number
+    layover: number
+    hopAt: number
+  }): number | null
   /** Take a bus off the map. */
   despawnBus(carId: number): void
   /** World position of a car, for drawing riders on board and finding stops. */
@@ -369,62 +400,199 @@ export function busPassable(lane: Lane): boolean {
  * the usual cause, and the right answer is to tell the player rather than to
  * invent a movement.
  */
-export function buildRouteLanes(
+export type RouteBuild = {
+  lanes: LaneId[]
+  returnAt: number
+  /**
+   * Index into `lanes` where the bus turns round mid-route, or -1.
+   *
+   * The far end of an out-and-back line: the outbound path ends there and the
+   * return picks up on the other side of the same street, which is not a
+   * movement any junction offers.
+   */
+  hopAt: number
+  /**
+   * The loop closes by turning the bus round at the terminus rather than by a
+   * movement the junction offers.
+   *
+   * A line between two junctions on the same street is the ordinary case, not
+   * an edge one, and it has no circuit: going out and coming back means facing
+   * the other way, which is a U-turn, and the model carries no U-turn
+   * connector. Real routes solve it the same way this does — the bus reaches
+   * the end of the line, sits at the kerb for a layover, and leaves in the
+   * other direction. Refusing to build the line instead is what made half of
+   * every two-junction line the player could draw come back as an error.
+   */
+  terminusHop: boolean
+}
+
+/**
+ * Why a drawn path could not become a line.
+ *
+ * Carried out to the UI, because "no drivable loop" is not something a player
+ * can act on. Which leg failed, or that the failure was in getting back to the
+ * start, is — one says move a junction, the other says the way home needs a
+ * street they have not included.
+ */
+export type RouteFailure =
+  | { kind: 'tooShort' }
+  | { kind: 'leg'; from: NodeId; to: NodeId; at: number }
+  | { kind: 'close' }
+
+/**
+ * Turn a list of clicked junctions into a closed, drivable loop.
+ *
+ * The search is over *states*, not over legs, and that is the whole of it. A
+ * junction is not a place a bus can simply be: it arrives on a particular lane,
+ * and which lane decides which movements it can make next. So the state is
+ * "reached the i-th clicked junction, standing on this lane", and the search
+ * keeps every lane it could have arrived on rather than the cheapest.
+ *
+ * The first version took the shortest way to each junction in turn and then
+ * demanded a way back to the exact lane it happened to start on. Both choices
+ * are arbitrary and together they are crippling: measured on a 19-junction
+ * import, **less than half of all two-junction lines could be built at all**,
+ * and two thirds of three-junction ones failed. Almost every one of those was a
+ * loop that exists and that the greedy walk had shut itself out of by turning
+ * down the wrong street a leg earlier.
+ *
+ * The cost of keeping the options is small. Branching is the number of lanes
+ * arriving at a junction — three or four — and only the cheapest chain to each
+ * is kept, so the frontier never grows past that. It runs per click, at the
+ * speed of a hand.
+ */
+export function buildRouteLanes(net: Network, nodes: NodeId[]): RouteBuild | null {
+  return explainRoute(net, nodes).route ?? null
+}
+
+/** `buildRouteLanes`, plus the reason when it comes back empty. */
+export function explainRoute(
   net: Network,
   nodes: NodeId[],
-): { lanes: LaneId[]; returnAt: number } | null {
-  if (nodes.length < 2) return null
+): { route: RouteBuild | null; failure: RouteFailure | null } {
+  if (nodes.length < 2) return { route: null, failure: { kind: 'tooShort' } }
 
-  const first = pathBetween(net, nodes[0], nodes[1], busPassable)
-  if (!first) return null
+  /** How far the search got, so a failure can name the leg that stopped it. */
+  let reached = 0
+  let anyStart = false
+  const opposite = oppositeLanes(net)
 
-  const lanes = [...first.lanes]
+  for (const startLane of lanesLeaving(net, nodes[0], busPassable)) {
+    anyStart = true
 
-  for (let i = 2; i < nodes.length; i++) {
-    const head = lanes[lanes.length - 1]
-    const leg = pathToNode(net, head, nodes[i], busPassable)
-    if (!leg) return null
-    // `leg` starts on the lane the previous one ended on, so drop that repeat.
-    lanes.push(...leg.lanes.slice(1))
+    /*
+     * Every way the bus could be standing having reached `nodes[i]`, keyed by
+     * the lane it is on and holding the cheapest chain that got it there. One
+     * entry per arrival lane is enough: two chains ending on the same lane are
+     * interchangeable for everything that follows, so only the shorter is worth
+     * carrying.
+     */
+    let level = new Map<LaneId, { chain: LaneId[]; cost: number }>([
+      [startLane, { chain: [startLane], cost: net.lanes[startLane].length }],
+    ])
+
+    for (let i = 1; i < nodes.length && level.size > 0; i++) {
+      const next = new Map<LaneId, { chain: LaneId[]; cost: number }>()
+
+      for (const [lane, state] of level) {
+        for (const leg of pathsToNode(net, lane, nodes[i], busPassable)) {
+          const end = leg.lanes[leg.lanes.length - 1]
+          const cost = state.cost + leg.length
+          const have = next.get(end)
+          if (have && have.cost <= cost) continue
+          next.set(end, { chain: [...state.chain, ...leg.lanes.slice(1)], cost })
+        }
+      }
+
+      level = next
+      if (level.size > 0) reached = Math.max(reached, i)
+    }
+
+    if (level.size === 0) continue
+
+    /*
+     * Close it. The way home has to reach the lane the loop began on, not
+     * merely the junction that lane leaves from — `advanceLanes` wraps a
+     * looping bus straight from the end of its chain to the start of it, so a
+     * loop that ends one connector short teleports across a junction every lap.
+     *
+     * Cheapest first, so a line comes back the short way when there is one.
+     */
+    const ends = [...level.entries()].sort((a, b) => a[1].cost - b[1].cost)
+    for (const [lane, state] of ends) {
+      const back = pathToLane(net, lane, startLane, busPassable)
+      if (!back) continue
+      return {
+        route: {
+          lanes: [...state.chain, ...back.lanes.slice(1)],
+          returnAt: state.chain.length,
+          hopAt: -1,
+          terminusHop: false,
+        },
+        failure: null,
+      }
+    }
+
+    /*
+     * No circuit from here. Two ways back, in order of how much a real service
+     * would prefer them.
+     *
+     * First: drive on and come back to the junction the line started from by
+     * some other street, turning round only there. That is a one-ended
+     * out-and-back and keeps the outbound street served in both directions
+     * plus whatever the way home passes.
+     *
+     * Then: come back down the other side of the street it came out on,
+     * turning round at both ends. This is the ordinary shape of a bus line and
+     * the reason the whole hop mechanism exists — a line up one street and back
+     * has no circuit at all, and refusing to build it is what made half of
+     * every two-junction line a player could draw come back as an error.
+     */
+    for (const [lane, state] of ends) {
+      const home = pathsToNode(net, lane, nodes[0], busPassable)
+      if (home.length === 0) continue
+      home.sort((a, b) => a.length - b.length)
+      return {
+        route: {
+          lanes: [...state.chain, ...home[0].lanes.slice(1)],
+          returnAt: state.chain.length,
+          hopAt: -1,
+          terminusHop: true,
+        },
+        failure: null,
+      }
+    }
+
+    for (const [, state] of ends) {
+      const back = reversePath(net, state.chain, opposite, busPassable)
+      if (!back) continue
+      return {
+        route: {
+          lanes: [...state.chain, ...back.lanes],
+          returnAt: state.chain.length,
+          // Arriving at the first lane of the return leg is the turn at the far
+          // end; the wrap back to `lanes[0]` is the turn at the near end.
+          hopAt: state.chain.length,
+          terminusHop: true,
+        },
+        failure: null,
+      }
+    }
   }
 
-  const returnAt = lanes.length
-
-  /*
-   * The way back.
-   *
-   * Direct first: on a two-way street the shortest path home is the street the
-   * line came out on, and on a one-way grid it is the avenue alongside, which
-   * is exactly what a real route does.
-   *
-   * Failing that, retrace — leg by leg back through the junctions the player
-   * clicked, in reverse. The direct search can fail on an imported map for
-   * reasons that have nothing to do with the line: a corner of the network
-   * whose only exit is a one-way pointing in, a stub the importer clipped at
-   * the box edge. Giving up there would refuse a line the player can see is
-   * drivable, because they just drew it. Retracing asks the smaller question at
-   * every junction instead of the whole-loop one at once, and answers it far
-   * more often.
-   */
-  const back = pathToLane(net, lanes[lanes.length - 1], lanes[0], busPassable)
-  if (back) {
-    lanes.push(...back.lanes.slice(1))
-    return { lanes, returnAt }
+  if (!anyStart || reached === 0) {
+    return {
+      route: null,
+      failure: { kind: 'leg', from: nodes[0], to: nodes[1], at: 1 },
+    }
   }
-
-  for (let i = nodes.length - 2; i >= 1; i--) {
-    const leg = pathToNode(net, lanes[lanes.length - 1], nodes[i], busPassable)
-    if (!leg) return null
-    lanes.push(...leg.lanes.slice(1))
+  if (reached < nodes.length - 1) {
+    return {
+      route: null,
+      failure: { kind: 'leg', from: nodes[reached], to: nodes[reached + 1], at: reached + 1 },
+    }
   }
-
-  // The last hop closes the loop onto the lane it started on, not merely onto
-  // the junction that lane leaves from.
-  const closing = pathToLane(net, lanes[lanes.length - 1], lanes[0], busPassable)
-  if (!closing) return null
-  lanes.push(...closing.lanes.slice(1))
-
-  return { lanes, returnAt }
+  return { route: null, failure: { kind: 'close' } }
 }
 
 /**
@@ -611,13 +779,30 @@ export class Transit {
 
   // ----------------------------------------------------------------- routes
 
-  /** Create a route from a list of clicked junctions. Null when it cannot be driven. */
-  addRoute(nodes: NodeId[]): TransitRoute | null {
-    const built = buildRouteLanes(this.host.net, nodes)
-    if (!built) return null
+  /**
+   * Create a route from a list of clicked junctions.
+   *
+   * Returns the reason rather than just null when it cannot be driven: "no
+   * drivable loop" is not a sentence a player can act on, and which leg failed
+   * — or that the failure was in getting home — is.
+   */
+  addRoute(nodes: NodeId[]): { route: TransitRoute } | { failure: RouteFailure } {
+    const { route: built, failure } = explainRoute(this.host.net, nodes)
+    if (!built) return { failure: failure ?? { kind: 'close' } }
 
-    if (import.meta.env?.DEV && !chainIsContinuous(this.host.net, built.lanes)) {
-      console.error('[transit] route chain is not continuous', nodes)
+    if (import.meta.env?.DEV) {
+      /*
+       * Every join must be a movement the graph declares, except the one the
+       * route says is a turn-round. A join that is neither is a bus teleporting
+       * across a junction, which looks like a rendering glitch and is not.
+       */
+      const broken = chainIsContinuous(this.host.net, built.lanes, built.hopAt)
+      if (broken >= 0) {
+        console.error(
+          `[transit] route chain breaks at ${broken} (hopAt ${built.hopAt})`,
+          nodes,
+        )
+      }
     }
 
     const id = `line-${this.nextRouteNumber}`
@@ -628,6 +813,8 @@ export class Transit {
       nodes: [...nodes],
       lanes: built.lanes,
       returnAt: built.returnAt,
+      hopAt: built.hopAt,
+      terminusHop: built.terminusHop,
       stops: [],
       buses: 0,
       running: 0,
@@ -645,7 +832,7 @@ export class Transit {
     this.host.regionChanged()
     this.setBuses(route.id, this.suggestedBuses(route))
     this.version++
-    return route
+    return { route }
   }
 
   removeRoute(id: RouteId): void {
@@ -675,11 +862,18 @@ export class Transit {
 
   /** How many buses a route needs for a bus every few minutes. */
   suggestedBuses(route: TransitRoute): number {
-    // A bus averages maybe 7 m/s round a city loop once stops and lights are
-    // paid for — well under its 10 m/s free-flow, and the difference is the
-    // whole reason frequency is a decision. Aim for one every four minutes.
+    /*
+     * A bus averages maybe 7 m/s round a city loop once stops and lights are
+     * paid for — well under its 10 m/s free-flow, and the difference is the
+     * whole reason frequency is a decision.
+     *
+     * Aim for one every two and a half minutes. Four minutes was the first
+     * guess and opened every new line visibly under-served: the player's first
+     * act after drawing a line was always to press +, which is a default that
+     * has decided it would rather be wrong.
+     */
     const roundTrip = route.length / 7
-    return Math.max(1, Math.min(12, Math.round(roundTrip / 240)))
+    return Math.max(2, Math.min(12, Math.round(roundTrip / 150)))
   }
 
   setBuses(id: RouteId, count: number): void {
@@ -715,7 +909,15 @@ export class Transit {
       const target = route.length * share
       const spawn = this.spawnPointAt(route, target)
       if (!spawn) break
-      const carId = this.host.spawnBus(spawn.lanes, spawn.at, route.id, route.colour)
+      const carId = this.host.spawnBus({
+        lanes: route.lanes,
+        index: spawn.index,
+        at: spawn.at,
+        routeId: route.id,
+        colour: route.colour,
+        layover: route.terminusHop || route.hopAt >= 0 ? LAYOVER : 0,
+        hopAt: route.hopAt,
+      })
       // Refused because something is standing on the spawn point. Give up for
       // now rather than looping — the fleet sweep will try again in ten seconds,
       // by which time the street will have moved.
@@ -729,34 +931,34 @@ export class Transit {
   }
 
   /**
-   * The lane chain a bus placed `target` metres round the loop should carry,
-   * rotated so its own position is the start of it.
+   * Where along the loop a bus placed `target` metres round it should start.
    *
-   * Rotating rather than setting an index into a shared chain because the sim's
-   * car model owns `route`/`routeIdx` and advances it linearly; a bus wraps by
-   * having `loop` set, and it wraps to the beginning of *its* chain.
+   * An index into the shared chain, not a rotated copy of it. Rotating is how
+   * this worked first and cannot survive a route with a turn-round in it: the
+   * rotation moves the index the turn happens at, so every bus would need its
+   * own idea of where that was. One chain and a starting index keeps `hopAt`
+   * meaning the same thing for all of them.
    */
   private spawnPointAt(
     route: TransitRoute,
     target: number,
-  ): { lanes: LaneId[]; at: number } | null {
+  ): { index: number; at: number } | null {
     const net = this.host.net
     let travelled = 0
 
     for (let i = 0; i < route.lanes.length; i++) {
       const lane = net.lanes[route.lanes[i]]
       if (travelled + lane.length >= target && lane.kind === 'road') {
-        // Rotate the chain to start on this lane. Connectors are never a start
-        // point: a bus materialising inside a junction box has no approach and
-        // the conflict model has nothing to hold it back with.
-        const lanes = [...route.lanes.slice(i), ...route.lanes.slice(0, i)]
-        return { lanes, at: Math.min(target - travelled, lane.length * 0.8) }
+        // Connectors are never a start point: a bus materialising inside a
+        // junction box has no approach, and the conflict model has nothing to
+        // hold it back with.
+        return { index: i, at: Math.min(target - travelled, lane.length * 0.8) }
       }
       travelled += lane.length
     }
 
     // Fell off the end (every candidate was a connector): start at the top.
-    return { lanes: [...route.lanes], at: 0 }
+    return { index: 0, at: 0 }
   }
 
   /**

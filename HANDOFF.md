@@ -18,6 +18,52 @@
 > streets (mean journey 608s, mean wait 195s), and 954 of 2340 with the ambient
 > traffic running. The rider ledger balances in both.
 >
+>
+> **Route building went through two rewrites, both forced by playing it.**
+>
+> The first version walked the clicked junctions greedily — shortest way to each
+> in turn — and then demanded a way back to the exact lane it happened to start
+> on. Both choices are arbitrary and together they are crippling: measured over
+> every pair of junctions on a nineteen-junction import, **less than half of all
+> two-junction lines could be built at all**. The search is now over *states* —
+> "reached the i-th junction, standing on this lane" — keeping every lane it
+> could have arrived on rather than the cheapest, and tried from every lane
+> leaving the first junction. Which lane a bus arrives on decides which
+> movements it can make next, so the cheapest way to a junction routinely left
+> it facing a direction the rest of the line could not be driven from.
+>
+> That took pairs from 48% to 80%, and the rest was not a search problem. **A
+> line up one street and back has no circuit**: turning round is a U-turn, and
+> the model carries no U-turn connector. Real routes solve it the way this now
+> does — the bus reaches the end of the line, stands at the kerb for a layover,
+> and sets off facing the other way. The return leg is the same roads on the
+> other side of the street (`reversePath`), and the two turn-rounds are the only
+> joins in a chain that are not movements the graph declares. Measured: the
+> hop moves a bus **3.5m** across the street, never more, so it is a manoeuvre
+> and not a teleport.
+>
+> **Measured over what a player actually draws** — every walk of adjacent
+> junctions on the map — the build rate is now 100% at two junctions, 99% at
+> three, and 97% at four and five. The nine remaining failures are genuine dead
+> ends and say so by name.
+>
+> **`hopAt` is why buses share one lane chain and carry a starting index.** They
+> used to get a rotated copy each, which cannot survive a route with a
+> turn-round in it: rotating moves the index the turn happens at.
+>
+> **People have to be visible or none of this means anything.** Two mistakes
+> made the game look empty, and they compounded. Demand was `nodes / 90` — one
+> trip every two and a half seconds across a whole borough, against ten-minute
+> journeys — and unserved trips stood for forty-five seconds before giving up.
+> A player who had drawn nothing saw individuals blink in and out and reasonably
+> concluded there were no people in it. Worse, unserved riders were painted
+> *grey*: the only picture the game gives of demand it is failing to serve was
+> rendered in the least visible colour available. They are now painted for where
+> they are trying to get to, like everyone else, they stand for four minutes,
+> and demand is set by how much has to be visible rather than by a guess at
+> realism. A city with no transit silting up with crowds is not a failure mode,
+> it is the picture.
+>
 > Three things are load-bearing and each was a bug first:
 >
 > - **A lane can carry stops from several lines.** A bus that asked "is there a

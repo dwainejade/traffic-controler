@@ -317,6 +317,21 @@ export type Car = {
   line: number;
   /** The transit route id, so the layer can find its own buses again. */
   routeId: string | null;
+  /**
+   * Seconds this vehicle holds each time its route wraps, or 0.
+   *
+   * The end of a line that has no circuit: the bus arrives at the junction it
+   * started from, stands there, and leaves facing the other way. Without the
+   * hold the change of direction happens between two frames and reads as the
+   * bus glitching across the street.
+   */
+  layover: number;
+  /**
+   * Index into `route` where arriving is a turn-round rather than a movement,
+   * or -1. The far end of an out-and-back line: the outbound path ends there
+   * and the return picks up on the other side of the same street.
+   */
+  hopAt: number;
 };
 
 export type GameState = "running" | "won" | "lost";
@@ -1470,9 +1485,9 @@ export class World {
   transitHost(): TransitHost {
     return {
       net: this.net,
-      spawnBus: (route, at, routeId, colour) => {
-        if (route.length === 0) return null;
-        const lane = this.net.lanes[route[0]];
+      spawnBus: ({ lanes, index, at, routeId, colour, layover, hopAt }) => {
+        if (lanes.length === 0) return null;
+        const lane = this.net.lanes[lanes[index]];
         if (!lane || lane.kind !== "road") return null;
 
         // Never materialise on top of whatever is already standing there.
@@ -1481,10 +1496,24 @@ export class World {
           return null;
         }
 
-        const car = this.create([...route], 0, "bus", Math.min(at, lane.length * 0.9));
+        /*
+         * A copy of the chain per bus, because `commitChange` rewrites the tail
+         * of `car.route` in place. Buses never change lane, so nothing writes to
+         * it today — but a shared array that only happens to be read-only is a
+         * trap for whoever adds the first exception.
+         */
+        const car = this.create(
+          [...lanes],
+          0,
+          "bus",
+          Math.min(at, lane.length * 0.9),
+          index,
+        );
         car.loop = true;
         car.line = colour;
         car.routeId = routeId;
+        car.layover = layover;
+        car.hopAt = hopAt;
         return car.id;
       },
       despawnBus: (carId) => {
@@ -1720,13 +1749,19 @@ export class World {
     return this.rand() < TRUCK_SHARE ? "truck" : "car";
   }
 
+  /**
+   * @param startIndex Where in `route` the vehicle begins. Non-zero only for a
+   * bus placed part-way round its own loop, which is how a fleet is spread over
+   * a service instead of departing the terminus all together.
+   */
   private create(
     route: LaneId[],
     district: number,
     kind: VehicleKind = "car",
     at = 0,
+    startIndex = 0,
   ): Car {
-    const laneId = route[0];
+    const laneId = route[startIndex];
 
     const id = this.free.pop();
     const car: Car =
@@ -1740,7 +1775,7 @@ export class World {
     car.s = at;
     car.v = VEHICLE[kind].v0 * 0.8;
     car.route = route;
-    car.routeIdx = 0;
+    car.routeIdx = startIndex;
     car.district = district;
     car.colour = this.pickColour();
     // Every field must be assigned here, not just on first construction: `car`
@@ -1761,6 +1796,8 @@ export class World {
     car.loop = false;
     car.line = -1;
     car.routeId = null;
+    car.layover = 0;
+    car.hopAt = -1;
 
     if (id === undefined) this.cars.push(car);
 
@@ -2535,6 +2572,8 @@ export class World {
           car.routeIdx = 0;
           car.lane = car.route[0];
           car.servedStop = -1;
+          // End of the line: stand a moment before setting off the other way.
+          if (car.layover > 0) car.dwellLeft = car.layover;
           this.net.lanes[car.lane].cars.push(car.id);
           continue;
         }
@@ -2542,6 +2581,14 @@ export class World {
         car.s -= lane.length;
         car.routeIdx++;
         car.lane = car.route[car.routeIdx];
+        /*
+         * The far end of the line. The lane it is moving onto starts at the
+         * junction the last one ended at — the other side of the same street —
+         * so the move is a few metres across, not a jump. Standing still for
+         * the layover is what makes it read as a bus turning round rather than
+         * as a bus glitching.
+         */
+        if (car.routeIdx === car.hopAt) car.dwellLeft = car.layover;
         this.net.lanes[car.lane].cars.push(car.id);
       }
     }

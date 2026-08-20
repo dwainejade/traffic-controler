@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { NodeId } from '../sim/types'
-import type { RouteId, Transit, TransitStats } from '../sim/transit'
+
+import type { RouteFailure, RouteId, Transit, TransitStats } from '../sim/transit'
 
 /**
  * Transit mode's UI state.
@@ -204,19 +205,34 @@ export function commitDraft(): void {
     return
   }
 
-  const route = layer.addRoute(draft)
-  if (!route) {
-    useTransit.setState({
-      // The honest cause, near enough: on a one-way grid the failure is almost
-      // always that there is no legal way back to the start, and saying "no
-      // route" would send the player looking at the leg they just drew.
-      error: 'No drivable loop through those junctions — try a parallel street for the return.',
-    })
+  const result = layer.addRoute(draft)
+  if ('failure' in result) {
+    useTransit.setState({ error: describe(result.failure) })
     return
   }
 
-  useTransit.setState({ drawing: false, draft: [], selected: route.id, error: null })
+  useTransit.setState({ drawing: false, draft: [], selected: result.route.id, error: null })
   publishTransit(layer)
+}
+
+/**
+ * The failure, in words the player can act on.
+ *
+ * Deliberately specific about *where*. "No drivable loop" is true of the whole
+ * path and tells them nothing about which part of it to change; a named leg
+ * sends them to the junction that needs moving.
+ */
+function describe(failure: RouteFailure): string {
+  switch (failure.kind) {
+    case 'tooShort':
+      return 'A line needs at least two junctions.'
+    case 'leg':
+      return `No way to drive from junction ${failure.at} to junction ${
+        failure.at + 1
+      } — one-way streets, most likely. Try a junction in between.`
+    case 'close':
+      return 'The path is drivable but the bus cannot get back to the start. Carry the line on round a block, or end it somewhere a return street reaches.'
+  }
 }
 
 export function removeRoute(id: RouteId): void {

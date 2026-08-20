@@ -46,10 +46,18 @@ export function useTransitLayer(
     layer.setHomes(
       sampleHomes(world.net, level.nodes, destinations, 260, level.seed),
     )
-    // Demand scales with the city. A five-block import and a whole borough
-    // should both open at a service load proportional to how much of them
-    // there is to serve, not at one number tuned on whichever was tested.
-    layer.demand = Math.max(0.3, Math.min(6, level.nodes.length / 90))
+    /*
+     * Demand scales with the city, and is set by how much of it has to be
+     * *visible*, not by a guess at realism.
+     *
+     * It was `nodes / 90`, which on a nineteen-junction import is one trip
+     * every two and a half seconds — spread over a borough and a ten-minute
+     * journey, that is a map with nobody on it. A stop has to grow a crowd
+     * within a minute of being watched or none of the colour-coding means
+     * anything, and that sets the floor.
+     */
+    const junctions = level.nodes.filter((n) => n.kind === 'junction').length
+    layer.demand = Math.max(1.2, Math.min(8, junctions / 8))
 
     world.transit = layer
     // The scripted bus service is switched off: an unowned bus running the OSM

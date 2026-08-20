@@ -349,15 +349,24 @@ function Riders() {
        * "this stop is failing" has to be visible before the riders vanish, or
        * the missed count goes up with nothing on screen having explained it.
        */
+      // Only somebody at a stop fades — they are running out of patience with a
+      // service that exists. Somebody with no service at all is not running out
+      // of anything the player can read; they simply need to be seen.
       const fading = rider.phase === 'waiting' ? Math.min(1, rider.waited / 600) : 0
       scratch.scale.set(grow, grow * (1 - fading * 0.45), grow)
       scratch.m.compose(scratch.pos, scratch.q, scratch.scale)
       mesh.setMatrixAt(n, scratch.m)
 
+      /*
+       * Everyone is painted for where they are trying to get to, including —
+       * especially — the people no line reaches. Those were grey, which was
+       * exactly backwards: they are the only picture the game gives of demand
+       * it is failing to serve, and the call to action was rendered in the least
+       * visible colour available. Grey is now kept for the moment someone is
+       * about to give up, where fading out is the point.
+       */
       scratch.colour.set(
-        rider.phase === 'unserved' || fading > 0.75
-          ? RIDER_GIVING_UP
-          : riderColor(rider.destination),
+        fading > 0.8 ? RIDER_GIVING_UP : riderColor(rider.destination),
       )
       mesh.setColorAt(n, scratch.colour)
       n++

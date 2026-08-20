@@ -42,70 +42,11 @@ export function lanesLeaving(net: Network, node: NodeId, allow?: (l: Lane) => bo
 }
 
 /**
- * Cheapest chain of lanes from a starting road lane to any road lane arriving at
- * `to`, or null when the junction cannot be reached under `allow`.
+ * Walk the predecessor table back into a lane chain.
  *
- * The chain includes the connectors, so it is exactly the shape `Car.route`
- * wants and can be concatenated with the next segment without a join step —
- * provided the next segment starts from the lane this one ended on, which is
- * what `startLane` is for.
+ * The chain alternates road, connector, road… because that is what the
+ * predecessor records: which road lane we came from and which movement we took.
  */
-export function pathToNode(
-  net: Network,
-  startLane: LaneId,
-  to: NodeId,
-  allow?: (l: Lane) => boolean,
-): LanePath | null {
-  const passable = (id: LaneId) => allow === undefined || allow(net.lanes[id])
-  if (!passable(startLane)) return null
-
-  if (net.lanes[startLane].toNode === to) {
-    return { lanes: [startLane], length: net.lanes[startLane].length }
-  }
-
-  const dist = new Map<LaneId, number>([[startLane, 0]])
-  /** How each lane was reached: the road lane before it and the connector used. */
-  const prev = new Map<LaneId, { lane: LaneId; via: LaneId }>()
-  const seen = new Set<LaneId>()
-
-  /*
-   * A binary heap would be the textbook answer and is not worth the code here:
-   * the frontier on a street network stays in the low hundreds, and a linear
-   * scan over it is faster than the allocation a heap of boxed entries costs.
-   */
-  const frontier: LaneId[] = [startLane]
-
-  while (frontier.length > 0) {
-    let bestAt = 0
-    for (let i = 1; i < frontier.length; i++) {
-      if ((dist.get(frontier[i]) ?? Infinity) < (dist.get(frontier[bestAt]) ?? Infinity)) bestAt = i
-    }
-    const current = frontier.splice(bestAt, 1)[0]
-    if (seen.has(current)) continue
-    seen.add(current)
-
-    const lane = net.lanes[current]
-    if (lane.toNode === to) return rebuild(net, prev, startLane, current)
-
-    const base = dist.get(current) ?? Infinity
-
-    for (const connector of lane.next) {
-      if (!passable(connector)) continue
-      const target = net.lanes[connector].next[0]
-      if (target === undefined || !passable(target)) continue
-
-      const cost = base + net.lanes[connector].length + net.lanes[target].length
-      if (cost >= (dist.get(target) ?? Infinity)) continue
-
-      dist.set(target, cost)
-      prev.set(target, { lane: current, via: connector })
-      frontier.push(target)
-    }
-  }
-
-  return null
-}
-
 function rebuild(
   net: Network,
   prev: Map<LaneId, { lane: LaneId; via: LaneId }>,
@@ -124,6 +65,63 @@ function rebuild(
   let length = 0
   for (const id of lanes) length += net.lanes[id].length
   return { lanes, length }
+}
+
+/**
+ * The cheapest chain from `startLane` to *every* lane that arrives at `to`.
+ *
+ * Not the same as `pathToNode`, which returns only the cheapest of them, and
+ * the difference is what makes a drawn line buildable. Which lane a bus arrives
+ * on decides which movements it can make next, so taking the shortest way to a
+ * junction can leave it facing a direction the rest of the route cannot be
+ * driven from. Handing back all the arrivals lets the caller keep every option
+ * open and pick one that works for the whole loop rather than for one leg.
+ */
+export function pathsToNode(
+  net: Network,
+  startLane: LaneId,
+  to: NodeId,
+  allow?: (l: Lane) => boolean,
+): LanePath[] {
+  const passable = (id: LaneId) => allow === undefined || allow(net.lanes[id])
+  if (!passable(startLane)) return []
+
+  const dist = new Map<LaneId, number>([[startLane, 0]])
+  const prev = new Map<LaneId, { lane: LaneId; via: LaneId }>()
+  const seen = new Set<LaneId>()
+  const frontier: LaneId[] = [startLane]
+  const arrivals: LaneId[] = []
+
+  if (net.lanes[startLane].toNode === to) arrivals.push(startLane)
+
+  while (frontier.length > 0) {
+    let bestAt = 0
+    for (let i = 1; i < frontier.length; i++) {
+      if ((dist.get(frontier[i]) ?? Infinity) < (dist.get(frontier[bestAt]) ?? Infinity)) bestAt = i
+    }
+    const current = frontier.splice(bestAt, 1)[0]
+    if (seen.has(current)) continue
+    seen.add(current)
+
+    const lane = net.lanes[current]
+    const base = dist.get(current) ?? Infinity
+
+    for (const connector of lane.next) {
+      if (!passable(connector)) continue
+      const target = net.lanes[connector].next[0]
+      if (target === undefined || !passable(target)) continue
+
+      const cost = base + net.lanes[connector].length + net.lanes[target].length
+      if (cost >= (dist.get(target) ?? Infinity)) continue
+
+      dist.set(target, cost)
+      prev.set(target, { lane: current, via: connector })
+      frontier.push(target)
+      if (net.lanes[target].toNode === to && !arrivals.includes(target)) arrivals.push(target)
+    }
+  }
+
+  return arrivals.map((id) => rebuild(net, prev, startLane, id))
 }
 
 /**
@@ -194,39 +192,24 @@ export function pathToLane(
 }
 
 /**
- * Cheapest chain from a junction to a junction, free to leave on any lane.
- *
- * Used for the first segment of a route and for the return leg, where nothing
- * upstream constrains which lane the bus is in. Everywhere else the caller has a
- * lane it must continue from and wants `pathToNode`.
- */
-export function pathBetween(
-  net: Network,
-  from: NodeId,
-  to: NodeId,
-  allow?: (l: Lane) => boolean,
-): LanePath | null {
-  let best: LanePath | null = null
-  for (const start of lanesLeaving(net, from, allow)) {
-    const path = pathToNode(net, start, to, allow)
-    if (path && (best === null || path.length < best.length)) best = path
-  }
-  return best
-}
-
-/**
- * Whether a lane chain is actually drivable: road, connector, road, connector,
+ * Check a lane chain is actually drivable: road, connector, road, connector,
  * road… with every link declared by the graph rather than merely adjacent.
+ *
+ * Returns the index of the first bad join, or -1 when the chain is sound.
  *
  * Cheap, and worth running in dev on every route the player closes. A chain with
  * one bad join does not throw — the bus simply teleports across the gap at the
  * end of the lane, which looks like a rendering glitch and is not.
+ *
+ * @param hopAt One index that is allowed to break, because the route says the
+ * bus turns round there rather than driving through. Everything else must join.
  */
-export function chainIsContinuous(net: Network, lanes: LaneId[]): boolean {
+export function chainIsContinuous(net: Network, lanes: LaneId[], hopAt = -1): number {
   for (let i = 0; i + 1 < lanes.length; i++) {
-    if (!net.lanes[lanes[i]].next.includes(lanes[i + 1])) return false
+    if (i + 1 === hopAt) continue
+    if (!net.lanes[lanes[i]].next.includes(lanes[i + 1])) return i
   }
-  return true
+  return -1
 }
 
 /** Total ground length of a lane chain, metres. */
@@ -234,4 +217,83 @@ export function chainLength(net: Network, lanes: LaneId[]): number {
   let total = 0
   for (const id of lanes) total += net.lanes[id].length
   return total
+}
+
+/**
+ * The same stretch of road, in the other direction.
+ *
+ * Built as a table because the question is asked for every lane of a route and
+ * the answer is a scan over the network. Lanes pair by road and by index: the
+ * outbound lane 0 of a road pairs with its backward lane 0, which is the lane
+ * directly across the centreline from it.
+ */
+export function oppositeLanes(net: Network): Map<LaneId, LaneId> {
+  const byRoad = new Map<string, Lane[]>()
+  for (const lane of net.lanes) {
+    if (lane.kind !== 'road' || lane.roadId === null) continue
+    const list = byRoad.get(lane.roadId) ?? []
+    list.push(lane)
+    byRoad.set(lane.roadId, list)
+  }
+
+  const opposite = new Map<LaneId, LaneId>()
+  for (const lanes of byRoad.values()) {
+    for (const lane of lanes) {
+      const other = lanes.find(
+        (l) =>
+          l.id !== lane.id &&
+          l.index === lane.index &&
+          l.fromNode === lane.toNode &&
+          l.toNode === lane.fromNode,
+      )
+      if (other) opposite.set(lane.id, other.id)
+    }
+  }
+  return opposite
+}
+
+/**
+ * The way back along a path already driven: the same roads, the other side of
+ * the street, in reverse order.
+ *
+ * This is what a bus line is when there is no circuit to run — which on a real
+ * street network is most of them. The turn at the far end is not a movement any
+ * junction offers, so it is not asked for: the caller stands the bus still for
+ * a layover and it sets off facing the other way, exactly as a bus at the end
+ * of the line does.
+ *
+ * Returns null when any leg of the outbound path is one-way, since there is
+ * then no other side of that street to come back on and the line genuinely has
+ * to loop.
+ */
+export function reversePath(
+  net: Network,
+  outbound: LaneId[],
+  opposite: Map<LaneId, LaneId>,
+  allow?: (l: Lane) => boolean,
+): LanePath | null {
+  const roads = outbound.filter((id) => net.lanes[id].kind === 'road')
+  if (roads.length === 0) return null
+
+  const back: LaneId[] = []
+  for (let i = roads.length - 1; i >= 0; i--) {
+    const other = opposite.get(roads[i])
+    if (other === undefined) return null
+    if (allow && !allow(net.lanes[other])) return null
+    back.push(other)
+  }
+
+  // Stitch: consecutive reversed lanes meet at a junction, and the movement
+  // between them is an ordinary one the junction offers — but it is not always
+  // a straight-through, so it is looked up rather than assumed.
+  const chain: LaneId[] = [back[0]]
+  for (let i = 1; i < back.length; i++) {
+    const leg = pathToLane(net, chain[chain.length - 1], back[i], allow)
+    if (!leg) return null
+    chain.push(...leg.lanes.slice(1), back[i])
+  }
+
+  let length = 0
+  for (const id of chain) length += net.lanes[id].length
+  return { lanes: chain, length }
 }

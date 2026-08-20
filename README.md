@@ -35,8 +35,9 @@ capacity, green-wave resonance).
 - Draw a bus line street by street — click junctions and the path is laid along
   the streets between them, always as a chain of movements the junctions
   actually offer
-- Lines are closed loops: the drawn path plus a routed return leg, so a one-way
-  avenue comes back down the next one over and no bus ever needs a U-turn
+- Lines close into a loop where the streets allow one — a one-way avenue comes
+  back down the next one over — and otherwise run out and back like a real bus
+  route, standing at the kerb for a layover at each end while the bus turns round
 - Stops placed automatically on the far side of each junction, spaced a block
   apart; buses added or removed per line, which is the frequency decision
 - Pedestrians spawn at home with a destination building in mind, walk up to
